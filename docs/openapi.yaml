@@ -42,7 +42,7 @@ paths:
       tags: [Lookups]
       operationId: getLookups
       summary: All reference lookups in one response (bootstrap for dropdowns)
-      description: Returns ETag and Cache-Control (max-age=300). Send If-None-Match to get 304.
+      description: Returns an ETag and Cache-Control no-cache. Send If-None-Match to revalidate; unchanged data gives a 304.
       parameters:
         - $ref: '#/components/parameters/IncludeInactive'
       responses:
@@ -1177,10 +1177,9 @@ paths:
         - { name: history, in: query, description: 'Include closed (past) rows', schema: { type: boolean, default: false } }
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/Size'
-        - $ref: '#/components/parameters/Sort'
       responses:
         '200':
-          description: Page of rate rows
+          description: Page of rate rows, newest first (no sort parameter)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/RateRowPage' }
@@ -1458,7 +1457,7 @@ components:
         status: { type: integer, example: 400 }
         code:
           type: string
-          enum: [VALIDATION_ERROR, NOT_FOUND, IN_USE, VERSION_CONFLICT, RATE_STARTS_BEFORE_CURRENT, FUTURE_RATE_EXISTS, NO_RATE, IMPORT_INVALID, FORBIDDEN]
+          enum: [VALIDATION_ERROR, NOT_FOUND, RATE_NOT_FOUND, IN_USE, DUPLICATE, VERSION_CONFLICT, RATE_STARTS_BEFORE_CURRENT, FUTURE_RATE_EXISTS, RATE_NOT_PENDING, NO_RATE, IMPORT_INVALID, UNAUTHORIZED, FORBIDDEN, INTERNAL_ERROR]
         detail: { type: string }
         fieldErrors:
           type: object
@@ -1478,6 +1477,8 @@ components:
       type: number
       format: double
       minimum: 0
+      multipleOf: 0.01
+      description: At most 2 decimal places (columns are numeric(10,2)).
       example: 185.0
 
     # ------------------------------------------------------------ lookups
@@ -2118,7 +2119,7 @@ components:
           example: { seasonId: 1, propertyId: [42, 43] }
         mode: { type: string, enum: [PERCENT, AMOUNT] }
         value: { type: number, description: 'Signed: 8 = +8% (or +8.00), -5 = -5%' }
-        rounding: { type: string, enum: [NONE, NEAREST_0_01, NEAREST_1], default: NEAREST_0_01 }
+        rounding: { type: string, enum: [NEAREST_0_01, NEAREST_1], default: NEAREST_0_01 }
         effectiveFrom: { type: string, format: date }
         dryRun: { type: boolean }
     RateAdjustItem:

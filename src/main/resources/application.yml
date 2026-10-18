@@ -1,0 +1,47 @@
+spring:
+  application:
+    name: master-data-service
+  cloud:
+    consul:
+      host: ${CONSUL_HOST:localhost}
+      port: ${CONSUL_PORT:8500}
+      discovery:
+        enabled: true
+        register: true
+        deregister: true
+        prefer-ip-address: true
+        health-check-path: /actuator/health
+        health-check-interval: 15s
+        instance-id: ${spring.application.name}:${random.value}
+  # The schema is owned by the existing tour-management database (loaded from the master data
+  # templates), so there is no ORM schema generation here - SQL goes through JdbcClient.
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/tour-management}
+    username: ${DB_USERNAME:postgres}
+    # Local dev default only - inject via env var for any shared/non-local environment.
+    password: ${DB_PASSWORD:postgres}
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${KEYCLOAK_ISSUER_URI:http://localhost:8880/realms/serenetravels}
+
+server:
+  port: 8082
+  forward-headers-strategy: framework
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+app:
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:8080}
+
+springdoc:
+  swagger-ui:
+    # Alphabetical endpoints and tags make a long catalogue easier to scan.
+    operations-sorter: alpha
+    tags-sorter: alpha

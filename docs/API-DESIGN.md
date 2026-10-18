@@ -47,7 +47,7 @@ Standalone: every lookup, `location-distances`, `info-articles`.
 - **Delete semantics:** property, vehicle, driver, guide, promotion and technical visit category are **soft-deleted** (`active=false`). Everything else is a hard delete, refused with `409 IN_USE` if still referenced.
 - **Optimistic locking:** mutable aggregates carry `version`. Send it back on `PATCH`/`PUT` to opt in; a mismatch is `409 VERSION_CONFLICT`. Omit it for fire-and-forget quick edits. Rate rows are append-only and need no version.
 - **Audit:** `createdBy` always comes from the JWT (`preferred_username`), never from the request body.
-- **Money:** JSON numbers with ≤ 2 decimals (per-km rates up to 4 are accepted). `unit` states what the number is.
+- **Money:** JSON numbers with at most 2 decimal places, because every rate column is `numeric(10,2)` (tax percentage is `numeric(5,2)`, max 100). Negative values and anything over the column maximum are rejected with a field error. `unit` states what the number is.
 - **Dates:** ISO-8601 `YYYY-MM-DD`; timestamps in UTC.
 - **Errors:** RFC 7807 `application/problem+json` — `{type, title, status, detail, code, fieldErrors: {field: message}}`. The FE binds `fieldErrors` straight onto form fields.
 
@@ -117,7 +117,7 @@ Paths are relative to `/api/v1/master-data`. Every endpoint, read or write, requ
 ### Bootstrap & lookups
 | Method & path | Purpose |
 |---|---|
-| `GET /lookups` | All cold reference data in one response (ETag + `Cache-Control: max-age=300`). FE caches at login |
+| `GET /lookups` | All cold reference data in one response. Sends an `ETag` and `Cache-Control: no-cache`: the FE keeps it and revalidates with `If-None-Match`, getting a cheap `304` until something changes, so an edit shows up immediately |
 | `GET /lookups/{name}` | One lookup. `name` ∈ `destinations`, `nationalities`, `languages`, `seasons`, `dietary-categories`, `meal-plans`, `hotel-inclusions`, `misc-cost-types`, `vehicle-types`, `tax-rates`, `technical-visit-categories` |
 | `POST /lookups/{name}` · `PATCH /lookups/{name}/{id}` · `DELETE /lookups/{name}/{id}` | Edit (rare). `409 IN_USE` on delete if referenced |
 
@@ -213,7 +213,7 @@ Paths are relative to `/api/v1/master-data`. Every endpoint, read or write, requ
   "detail": "2 fields are invalid", "fieldErrors": { "rate": "must be greater than 0", "seasonId": "unknown season" } }
 ```
 
-Stable `code` values: `VALIDATION_ERROR`, `NOT_FOUND`, `IN_USE`, `VERSION_CONFLICT`, `RATE_STARTS_BEFORE_CURRENT`, `FUTURE_RATE_EXISTS`, `NO_RATE`, `IMPORT_INVALID`, `FORBIDDEN`.
+Stable `code` values: `VALIDATION_ERROR`, `NOT_FOUND`, `RATE_NOT_FOUND`, `IN_USE`, `DUPLICATE`, `VERSION_CONFLICT`, `RATE_STARTS_BEFORE_CURRENT`, `FUTURE_RATE_EXISTS`, `RATE_NOT_PENDING`, `NO_RATE`, `IMPORT_INVALID`, `UNAUTHORIZED`, `FORBIDDEN`, `INTERNAL_ERROR`.
 
 ## 8. Making it easy for the FE
 
@@ -243,13 +243,27 @@ Master data is an **internal back-office service**. Roles are the ones user-serv
 ## 10. Implementation notes (Spring, aligned with user-service)
 
 - Package layout follows user-service: flat layers under `lk.serenetravels.masterdataservice` — `config/ controller/ dto/ entity/ exception/ repository/ service/ service/impl/ util/`. Every service = interface in `service/` + `impl/`.
-- Needed dependencies (the skeleton only has `spring-boot-starter` today): `web`, `data-jpa`, `postgresql`, `validation`, `oauth2-resource-server`, `springdoc-openapi-starter-webmvc-ui`, `spring-cloud-starter-consul-discovery`, `spring-boot-starter-actuator`, plus Apache POI (`poi-ooxml`) for import/export. Note the skeleton's `java.version` is 25 while user-service is 17 — pick one deliberately.
-- Rate engine = **one generic service** driven by a `RateFamily` registry (table, key columns, unit, nullable-key rules) rather than ten services. Entities can stay per-table; the registry maps family → repository + key spec. Specifications (`util/*Specifications`) for list filters, as in user-service.
-- DB: reuse the existing schema; Flyway baseline from it. Keep `ddl-auto=validate`.
+- Dependencies in use: `web`, `jdbc`, `postgresql`, `validation`, `security`, `oauth2-resource-server`, `springdoc-openapi-starter-webmvc-ui`, `spring-cloud-starter-consul-discovery`, `actuator`. Still to add for import/export: Apache POI (`poi-ooxml`). The service runs on Java 25 (the skeleton's choice, same as the gateway); user-service is on 17.
+- Rate engine = **one generic service** (`RateServiceImpl`) driven by the `util/RateFamilies` registry (table, key columns, value column, unit, nullable-key rules, fan-out key) rather than ten services. It uses `JdbcClient` with named parameters rather than JPA entities: all ten tables share one shape, so generic SQL built from the fixed registry (never from request input) is far smaller than ten entities and repositories. Lookups work the same way (`util/LookupDefinitions`). The aggregates (property, vehicle, …) can use JPA or JDBC when they are built.
+- DB: reuses the existing `tour-management` schema as is (no ORM schema generation). Adding Flyway with a baseline taken from it is a sensible next step once the service needs to change the schema.
 - Gateway: register `lb://master-data-service` route in `GatewayRouteConfig`, add public-paths for `/master-data-service/swagger-ui/**` and `/master-data-service/v3/api-docs/**`, add `springdoc.swagger-ui.urls[1]` for the aggregated UI, and add the same CORS origin config user-service has.
 - `server.forward-headers-strategy=framework` (needed for correct Swagger server URLs behind ngrok/https).
 
-## 11. Resolved decisions and open items
+## 11. Implementation status
+
+| Area | State |
+|---|---|
+| Foundation: security (Keycloak realm roles, ADMIN/MANAGER only), problem+json errors, springdoc, Consul registration, CORS | ✅ built |
+| Lookups: bundle (ETag), per-lookup list / create / edit / delete, soft delete for technical visit categories | ✅ built |
+| Rate engine: families, list, set (close-and-open, vehicle fan-out), correct, delete pending, adjust (dry run), resolve, property grid save | ✅ built |
+| Aggregates: properties, attractions, restaurants, packages, vehicles, drivers, guides, promotions, distances, articles | ⏳ not built |
+| Alerts, import / export | ⏳ not built |
+| Rate list `sort` | Not supported on `GET /rates/{family}`: rows are always newest-first (`effective_from desc`) |
+| Promotion value unit | USD until `promotion.type` has agreed values (a percentage promotion would be PERCENT) |
+
+Tests: unit and HTTP tests run on in-memory H2 (PostgreSQL mode). `LivePostgresSmokeTest` is an opt-in check against the real schema (`mvnw test -Dtest=LivePostgresSmokeTest -Dlive.db=true`); it reads real data and writes only to session-local `TEMP` copies of the tables, so it cannot change `tour-management`.
+
+## 12. Resolved decisions and open items
 
 **Resolved**
 
