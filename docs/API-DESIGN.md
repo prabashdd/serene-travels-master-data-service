@@ -1,0 +1,266 @@
+# master-data-service — API design
+
+Status: **draft v0.1**. Companion file: [`openapi.yaml`](openapi.yaml) (the machine-readable skeleton of everything below).
+Data source: the `tour-management` Postgres schema (41 tables, see [Data model → API map](#3-data-model--api-map)).
+
+## 1. Principles
+
+1. **Aggregates for people, tables for storage.** The FE edits a *Property*, a *Vehicle*, an *Attraction* — never `room_type` + `property_child_rule` + `baby_cot_option` separately. Read endpoints return the aggregate; child collections are edited through the parent.
+2. **Every price goes through one rate engine.** The ten `*_rate` / `*_value` tables are all "append-only history rows". They share one set of endpoints (`/rates/{family}`) instead of ten bespoke ones.
+3. **One bootstrap call for dropdowns.** Cold reference data is fetched once (`GET /lookups`) and cached by the FE.
+4. **Quick edit is the default path, forms are the exception.** Single-field `PATCH`, and a rate change is "type a number".
+5. **The contract is the OpenAPI file.** The FE generates its types/client from it; nobody hand-writes URLs.
+
+## 2. Decisions taken
+
+| # | Decision | Consequence |
+|---|---|---|
+| D1 | Vehicle rates keep their `season_id NOT NULL` (3 season rows per vehicle type, same value) | `PUT /rates/vehicle` without a `seasonId` writes **all** season rows in one transaction; the FE only ever sees one rate per vehicle type unless a season is named |
+| D2 | Currency: **USD** for all rates **except** vehicle and transport per-km, and tuk-tuk fares, which are **LKR** | Every rate row carries a `unit` (`USD` / `LKR` / `PERCENT`); fixed per family, exposed by `GET /rates/families` |
+| D3 | Writes: **ADMIN and MANAGER** | `hasAnyRole('ADMIN','MANAGER')` on every non-GET |
+| D4 | This is an **internal back-office service**: AGENT has no access at all | Every endpoint requires ADMIN or MANAGER. Agents only ever see a price inside a quotation, which the quotation service builds by calling `GET /rates/resolve` server-to-server; see [§9](#9-authorization) |
+| D5 | `technical_visit_category` is **soft-deleted** (`active=false`) | `DELETE /lookups/technical-visit-categories/{id}` deactivates instead of removing; lookups for it return `active`, and `GET /lookups` returns only active ones unless `?includeInactive=true` |
+
+## 3. Data model → API map
+
+| Tier | Tables | Churn | API surface |
+|---|---|---|---|
+| **Cold reference** | `destination`, `nationality`, `language`, `dietary_category`, `meal_plan_type`, `hotel_inclusion`, `vehicle_type`, `misc_cost_type`, `tax_rate`, `technical_visit_category`, `season` | Almost never | `/lookups` (bundle) and `/lookups/{name}` (CRUD) |
+| **Structural aggregates** | `property` (+`room_type`, `property_child_rule`, `property_inclusion`, `baby_cot_option`, `property_dietary_capability`), `attraction` (+`tuk_tuk_location`), `restaurant` (+`restaurant_closed_day`, `restaurant_dietary_capability`), `site_tour_package` (+`site_tour_package_site`), `location_distance`, `info_article` | When onboarding an entity | `/properties`, `/attractions`, `/restaurants`, `/packages`, `/location-distances`, `/info-articles` |
+| **Operational** | `vehicle`, `driver`, `guide` (+`guide_language`), `promotion` | Weekly / monthly | `/vehicles`, `/drivers`, `/guides`, `/promotions`, `/alerts` |
+| **Hot — versioned prices** | `property_rate`, `vehicle_rate`, `attraction_rate`, `guide_accommodation_rate`, `misc_cost_rate`, `tuk_tuk_fare_rate`, `site_tour_package_rate`, `tax_rate_value`, `promotion_value`, `transport_rate_config` | Every price revision | `/rates/{family}` + `/properties/{id}/rates` (grid) |
+
+Combined views (read as one): Property, Attraction, Vehicle (+type, driver, assistant, expiry warnings), Guide (+languages), Restaurant (+closed days, dietary), Package (+sites, current rate), Promotion (+current value).
+Standalone: every lookup, `location-distances`, `info-articles`.
+
+## 4. Conventions
+
+- **Base path:** `/api/v1/master-data`. Through the gateway: `/master-data-service/api/v1/master-data/…` (service-id prefixed, like user-service).
+- **IDs:** integers (the schema uses `integer` identity columns).
+- **FK expansion:** every FK is returned as `{ "id": 7, "name": "Habarana" }` (`Ref`), so the FE never does a second lookup to render a label. Writes accept plain ids (`destinationId`).
+- **Lists:** Spring `Page` — `content`, `totalElements`, `totalPages`, `number`, `size`, `first`, `last`, `empty`. Query: `page` (0-based), `size`, `sort`.
+  **`sort` is `property,direction` and repeatable:** `?sort=name,asc&sort=id,desc`. In the Swagger "Try it out" JSON box it is an array: `"sort": ["name,asc"]`. Sortable properties are the ones on the list-row schema.
+  List rows are **summaries** (slim); `GET /{id}` returns the full aggregate. `?q=` is a case-insensitive contains match on name/code.
+- **As-of reads:** `?at=2026-12-01` evaluates "current" rates on that date. Default is today. `isCurrent` is computed by the server — the FE never does date maths.
+- **Expansion:** `GET /{id}?include=rates,roomTypes` for optional heavy parts (documented per resource).
+- **Writes:** `POST` → `201` + body + `Location`. `PATCH` → `200` + updated body (send only changed fields). `PUT` on collections replaces the whole collection. `DELETE` → `204`.
+- **Delete semantics:** property, vehicle, driver, guide, promotion and technical visit category are **soft-deleted** (`active=false`). Everything else is a hard delete, refused with `409 IN_USE` if still referenced.
+- **Optimistic locking:** mutable aggregates carry `version`. Send it back on `PATCH`/`PUT` to opt in; a mismatch is `409 VERSION_CONFLICT`. Omit it for fire-and-forget quick edits. Rate rows are append-only and need no version.
+- **Audit:** `createdBy` always comes from the JWT (`preferred_username`), never from the request body.
+- **Money:** JSON numbers with ≤ 2 decimals (per-km rates up to 4 are accepted). `unit` states what the number is.
+- **Dates:** ISO-8601 `YYYY-MM-DD`; timestamps in UTC.
+- **Errors:** RFC 7807 `application/problem+json` — `{type, title, status, detail, code, fieldErrors: {field: message}}`. The FE binds `fieldErrors` straight onto form fields.
+
+## 5. The rate engine
+
+### 5.1 Families
+
+`GET /rates/families` returns this table as data, so the FE can render a generic rate grid/form from metadata.
+
+| `family` | Table | Key fields (`keys`) | Unit | "All" when key is null |
+|---|---|---|---|---|
+| `property` | `property_rate` | `propertyId`, `roomTypeId`, `seasonId`, `occupancy`, `nationalityId?` | USD | nationality |
+| `vehicle` | `vehicle_rate` | `vehicleTypeId`, `seasonId` (optional on write → all seasons) | LKR per km | — |
+| `attraction` | `attraction_rate` | `attractionId`, `rateType` | USD | — |
+| `guide-accommodation` | `guide_accommodation_rate` | `seasonId`, `destinationId?` | USD | destination |
+| `misc` | `misc_cost_rate` | `miscCostTypeId`, `nationalityId?` | USD | nationality |
+| `tuk-tuk` | `tuk_tuk_fare_rate` | `tukTukLocationId` | LKR | — |
+| `package` | `site_tour_package_rate` | `packageId` | USD | — |
+| `tax` | `tax_rate_value` | `taxRateId` | PERCENT | — |
+| `promotion` | `promotion_value` | `promotionId` | USD *or* PERCENT by promotion `type` | — |
+| `transport` | `transport_rate_config` | *(none — singleton)* | LKR per km | — |
+
+> Confirmed: `misc`, `package`, `guide-accommodation` are USD; `tuk-tuk` is LKR (D2). The unit is a property of the family registry, so changing one later needs no endpoint changes.
+
+### 5.2 Semantics (all families)
+
+Intervals are **half-open `[effectiveFrom, effectiveTo)`** — this matches the existing `CHECK (effective_to > effective_from)`. At most one open row (`effective_to IS NULL`) per key combination (the existing `ux_*_active` indexes).
+
+`PUT /rates/{family}` — **set rate** (the "quick edit"):
+
+```json
+{ "keys": { "propertyId": 42, "roomTypeId": 1, "seasonId": 1, "occupancy": 2, "nationalityId": null },
+  "rate": 185.00,
+  "effectiveFrom": "2026-11-01" }
+```
+
+1. `effectiveFrom` defaults to **today**.
+2. If no open row exists → insert.
+3. If an open row exists → set its `effective_to = effectiveFrom`, insert the new open row. One transaction.
+4. `effectiveFrom <= open.effective_from` → `409 RATE_STARTS_BEFORE_CURRENT` (use `PATCH` to correct a mistake instead).
+5. A future-dated row already pending for these keys → `409 FUTURE_RATE_EXISTS` (edit or delete that pending row).
+6. **Vehicle only:** `seasonId` omitted → steps 2–3 run for every season (D1); `seasonId` present → just that season.
+7. Response: the new `RateRow`(s).
+
+`PATCH /rates/{family}/{id}` — **correct** a row in place (typo fix). Allowed fields: `rate`, `effectiveFrom`, `effectiveTo`. `DELETE` only removes a **pending future** row; history is never deleted.
+> Gap: the schema has `created_by` but no `updated_by`/audit trail for in-place corrections. Recommended follow-up: a small `rate_audit` table written by the service. Not required for v1.
+
+`POST /rates/{family}/adjust` — **bulk percent/amount change** with preview:
+
+```json
+{ "filter": { "seasonId": 1, "propertyId": [42, 43] },
+  "mode": "PERCENT", "value": 8, "rounding": "NEAREST_1",
+  "effectiveFrom": "2026-11-01", "dryRun": true }
+```
+`dryRun=true` returns `[{keys, oldRate, newRate}]` and writes nothing; `false` applies it atomically through the same rule as `PUT`.
+
+`GET /rates/{family}?filter[propertyId]=42&filter[seasonId]=1` — rates for a key subset. `at=` for as-of, `history=true` to include closed rows (this is the audit/history view).
+
+`GET /rates/resolve?family=property&propertyId=42&roomTypeId=1&seasonId=1&occupancy=2&nationalityId=9&at=2026-12-01` — **the quote-engine lookup**. Returns one price. For families with a nullable "all" key it tries the exact key first, then falls back to the `NULL` row, and says which it used (`"matched": "FALLBACK_ALL_NATIONALITIES"`). `404 NO_RATE` if neither exists — the booking service must handle that explicitly.
+
+`PUT /properties/{id}/rates` — **grid save**: array of the same `{keys, rate}` items for one property, applied atomically (all-or-nothing). Designed for the room type × season × nationality × occupancy matrix editor.
+
+## 6. Endpoint catalogue
+
+Paths are relative to `/api/v1/master-data`. Every endpoint, read or write, requires ADMIN or MANAGER (the one exception is the quotation service's service account on `GET /rates/resolve`). See [§9](#9-authorization).
+
+### Bootstrap & lookups
+| Method & path | Purpose |
+|---|---|
+| `GET /lookups` | All cold reference data in one response (ETag + `Cache-Control: max-age=300`). FE caches at login |
+| `GET /lookups/{name}` | One lookup. `name` ∈ `destinations`, `nationalities`, `languages`, `seasons`, `dietary-categories`, `meal-plans`, `hotel-inclusions`, `misc-cost-types`, `vehicle-types`, `tax-rates`, `technical-visit-categories` |
+| `POST /lookups/{name}` · `PATCH /lookups/{name}/{id}` · `DELETE /lookups/{name}/{id}` | Edit (rare). `409 IN_USE` on delete if referenced |
+
+### Aggregates
+| Resource | List / create | Item | Child endpoints |
+|---|---|---|---|
+| **properties** | `GET`/`POST /properties` (`q`, `destinationId`, `active`, `starRating`) | `GET`/`PATCH`/`DELETE /properties/{id}` (`include=rates`) | `POST /properties/{id}/room-types`; `PATCH`/`DELETE /room-types/{id}`; `PUT /properties/{id}/child-rules`; `PUT /properties/{id}/inclusions`; `PUT /properties/{id}/dietary`; `PUT /properties/{id}/baby-cot`; `PUT /properties/{id}/rates` (grid) |
+| **attractions** | `GET`/`POST /attractions` (`q`, `destinationId`, `isSafari`) | `GET`/`PATCH`/`DELETE` | tuk-tuk fare via family `tuk-tuk` |
+| **restaurants** | `GET`/`POST /restaurants` | `GET`/`PATCH`/`DELETE` | `PUT /restaurants/{id}/closed-days`; `PUT /restaurants/{id}/dietary` |
+| **packages** | `GET`/`POST /packages` | `GET`/`PATCH`/`DELETE` | `PUT /packages/{id}/sites` |
+| **vehicles** | `GET`/`POST /vehicles` (`q`, `vehicleTypeId`, `active`, `expiringWithinDays`) | `GET`/`PATCH`/`DELETE` | — |
+| **drivers** | `GET`/`POST /drivers` | `GET`/`PATCH`/`DELETE` | — |
+| **guides** | `GET`/`POST /guides` (`q`, `guideType`, `languageId`) | `GET`/`PATCH`/`DELETE` | `PUT /guides/{id}/languages` |
+| **promotions** | `GET`/`POST /promotions` (`active`, `validOn`) | `GET`/`PATCH`/`DELETE` | value via family `promotion` |
+| **location-distances** | `GET`/`POST` (`fromDestinationId`, `toDestinationId`) | `GET`/`PATCH`/`DELETE` | — |
+| **info-articles** | `GET`/`POST` (`category`, `destinationId`) | `GET`/`PATCH`/`DELETE` | — |
+
+`PUT` on a child collection **replaces the whole set** (send the full list). That is intentionally simpler for the FE than add/remove diffs; it is only used for collections nothing else references by id (child rules, inclusions, dietary, closed days, languages, package sites). Room types are real CRUD because rates point at them.
+
+### Rates
+`GET /rates/families` · `GET /rates/{family}` · `PUT /rates/{family}` · `PATCH`/`DELETE /rates/{family}/{id}` · `POST /rates/{family}/adjust` · `GET /rates/resolve`
+
+### Operations
+| Method & path | Purpose |
+|---|---|
+| `GET /alerts` | Vehicle insurance / revenue-licence expiries (`withinDays`, default 30), vehicles with no driver, rates ending soon, properties with no current rate |
+| `GET /import/{table}/template` | Download the `.xlsx` template for a table — same layout as today's `Immediate_Master_Data_Upload_Template.xlsx` sheets |
+| `POST /import/{table}?dryRun=true` | Upload `.xlsx`/`.csv`. Dry run returns per-row validation errors and counts; `dryRun=false` commits atomically |
+| `GET /export/{table}?format=xlsx\|csv` | Download current data |
+
+`{table}` ∈ `nationalities`, `transport-rates`, `guide-accommodation-rates`, `attractions`, `vehicle-rates`, `misc-cost-rates`, `property-dietary`, `property-child-rules`, `restaurants`, `site-tour-packages`, `promotions`, `properties`, `vehicles`, `drivers`, `guides` (mirrors the two business templates; extend as needed).
+
+## 7. JSON shapes
+
+### Property (detail)
+```json
+{
+  "id": 42, "code": "HTL-0042", "name": "Cinnamon Lodge", "active": true, "starRating": 5,
+  "address": "Habarana", "website": null, "email": null, "phone": null,
+  "destination": { "id": 7, "name": "Habarana" },
+  "roomTypes": [{ "id": 1, "name": "Deluxe", "baseCapacity": 2, "extraBedAllowed": true }],
+  "childRules": [{ "id": 11, "minAge": 3, "maxAge": 11, "requiresBed": false, "cost": 25.00 }],
+  "inclusions": [{ "inclusion": { "id": 3, "name": "Breakfast" }, "cost": null }],
+  "babyCot": { "available": true, "cost": 10.00 },
+  "dietary": [{ "category": { "id": 2, "name": "Vegan" }, "supported": true }],
+  "rates": null,
+  "version": 4
+}
+```
+`rates` is `null` unless `?include=rates`, then an array of `RateRow`.
+
+### Property (list row)
+```json
+{ "id": 42, "code": "HTL-0042", "name": "Cinnamon Lodge", "active": true, "starRating": 5,
+  "destination": { "id": 7, "name": "Habarana" }, "roomTypeCount": 4,
+  "fromRate": { "rate": 120.00, "unit": "USD" } }
+```
+
+### RateRow
+```json
+{ "id": 901, "family": "property",
+  "keys": { "propertyId": 42, "roomTypeId": 1, "seasonId": 1, "occupancy": 2, "nationalityId": null },
+  "labels": { "propertyId": "Cinnamon Lodge", "roomTypeId": "Deluxe", "seasonId": "Summer", "nationalityId": null },
+  "rate": 185.00, "unit": "USD",
+  "effectiveFrom": "2026-04-01", "effectiveTo": null, "isCurrent": true,
+  "createdAt": "2026-10-18T06:12:44Z", "createdBy": "prabash" }
+```
+`labels` lets a generic grid render key columns without joining client-side.
+
+### Vehicle
+```json
+{ "id": 5, "registrationNo": "CAB-1234", "vehicleType": { "id": 2, "name": "Van - Flat Roof" },
+  "seatingCapacity": 9, "method": "OWNED", "ownerName": null,
+  "insuranceCompany": "Ceylinco", "policyNumber": "P-889", "insuranceExpiryDate": "2026-11-02",
+  "revenueLicenseExpiryDate": "2027-01-15",
+  "driver": { "id": 3, "name": "Nimal Perera" }, "assistant": null, "active": true,
+  "warnings": [{ "code": "INSURANCE_EXPIRING", "daysLeft": 15 }], "version": 2 }
+```
+
+### Lookup bundle (`GET /lookups`)
+```json
+{ "destinations": [{ "id": 7, "name": "Habarana", "region": "North Central", "country": "Sri Lanka" }],
+  "nationalities": [{ "id": 9, "name": "India", "isoCode": "IN" }],
+  "seasons": [{ "id": 1, "name": "Summer", "startDate": "2026-04-01", "endDate": "2026-10-31" }],
+  "vehicleTypes": [{ "id": 1, "name": "Car", "minCapacity": 1, "maxCapacity": 2 }],
+  "languages": [], "dietaryCategories": [], "mealPlans": [], "hotelInclusions": [],
+  "miscCostTypes": [], "taxRates": [], "technicalVisitCategories": [] }
+```
+
+### Problem
+```json
+{ "type": "about:blank", "title": "Validation failed", "status": 400, "code": "VALIDATION_ERROR",
+  "detail": "2 fields are invalid", "fieldErrors": { "rate": "must be greater than 0", "seasonId": "unknown season" } }
+```
+
+Stable `code` values: `VALIDATION_ERROR`, `NOT_FOUND`, `IN_USE`, `VERSION_CONFLICT`, `RATE_STARTS_BEFORE_CURRENT`, `FUTURE_RATE_EXISTS`, `NO_RATE`, `IMPORT_INVALID`, `FORBIDDEN`.
+
+## 8. Making it easy for the FE
+
+- **Generate, don't write:** `openapi-typescript` / `openapi-generator` against `/v3/api-docs` (springdoc) or this file → typed client. Re-generate on each backend change.
+- **Uniform URL grammar** — `/{resource}`, `/{resource}/{id}`, `/rates/{family}` — so one generic data-table + one generic rate-grid component covers most screens.
+- **`GET /rates/families` and `GET /lookups` are metadata endpoints**: they let the FE build rate forms and dropdowns without hard-coding table knowledge.
+- **`labels`, `Ref`, and `isCurrent` pre-computed** — render-ready rows, no joins or date logic in the browser.
+- **Inline edit = `PATCH` with one field;** rate edit = `PUT /rates/...` with one number. Neither needs a form dialog.
+- **Matrix editor** for property rates saves with one call (`PUT /properties/{id}/rates`), atomically — no half-saved grids.
+- **Safe bulk:** adjust and import both have `dryRun`, so the UI can show a diff/preview step before commit.
+- **CORS:** the FE should call through the gateway (same pattern as user-service: `app.cors.allowed-origins`).
+
+## 9. Authorization
+
+Master data is an **internal back-office service**. Roles are the ones user-service puts in the Keycloak token: `ADMIN`, `MANAGER` (and `AGENT`, which this service never accepts).
+
+| Capability | ADMIN | MANAGER | AGENT | Quotation service account |
+|---|:-:|:-:|:-:|:-:|
+| All `GET` (lookups, aggregates, rates, history, alerts) | ✅ | ✅ | ❌ | ❌ |
+| Any write (`POST`/`PUT`/`PATCH`/`DELETE`), `adjust`, `import` | ✅ | ✅ | ❌ | ❌ |
+| `GET /rates/resolve` | ✅ | ✅ | ❌ | ✅ |
+
+- **Enforcement:** class-level `@PreAuthorize("hasAnyRole('ADMIN','MANAGER')")` on every controller, so a new endpoint is protected by default. `GET /rates/resolve` alone also accepts the service role below. The gateway only validates that a JWT is valid, not roles, so this check must live in the service.
+- **How agents get prices:** the agent calls the (future) quotation service; that service calls `GET /rates/resolve` with its **own** token, obtained via the Keycloak client-credentials flow (a dedicated client whose service account carries a `QUOTATION_SERVICE` realm role). The agent's token is never forwarded to master data, and the quotation service decides what an agent may see (e.g. the quoted total, not cost breakdowns).
+- Because AGENT is rejected everywhere, there is no need for a separate `sellingPrice` field in this service. Selling price and markup belong to the quotation service.
+
+## 10. Implementation notes (Spring, aligned with user-service)
+
+- Package layout follows user-service: flat layers under `lk.serenetravels.masterdataservice` — `config/ controller/ dto/ entity/ exception/ repository/ service/ service/impl/ util/`. Every service = interface in `service/` + `impl/`.
+- Needed dependencies (the skeleton only has `spring-boot-starter` today): `web`, `data-jpa`, `postgresql`, `validation`, `oauth2-resource-server`, `springdoc-openapi-starter-webmvc-ui`, `spring-cloud-starter-consul-discovery`, `spring-boot-starter-actuator`, plus Apache POI (`poi-ooxml`) for import/export. Note the skeleton's `java.version` is 25 while user-service is 17 — pick one deliberately.
+- Rate engine = **one generic service** driven by a `RateFamily` registry (table, key columns, unit, nullable-key rules) rather than ten services. Entities can stay per-table; the registry maps family → repository + key spec. Specifications (`util/*Specifications`) for list filters, as in user-service.
+- DB: reuse the existing schema; Flyway baseline from it. Keep `ddl-auto=validate`.
+- Gateway: register `lb://master-data-service` route in `GatewayRouteConfig`, add public-paths for `/master-data-service/swagger-ui/**` and `/master-data-service/v3/api-docs/**`, add `springdoc.swagger-ui.urls[1]` for the aggregated UI, and add the same CORS origin config user-service has.
+- `server.forward-headers-strategy=framework` (needed for correct Swagger server URLs behind ngrok/https).
+
+## 11. Resolved decisions and open items
+
+**Resolved**
+
+- Currency: `misc`, `package`, `guide-accommodation` are USD; `tuk-tuk` is LKR (with vehicle and transport per-km). Tax is PERCENT.
+- Rate intervals are half-open `[from, to)`, matching the existing `CHECK (effective_to > effective_from)`. Note that existing seasons use inclusive end dates, so no one should hand-enter `effective_to` as an inclusive last day.
+- `restaurant_closed_day.day_of_week` is ISO (1 = Monday … 7 = Sunday).
+- `attraction.pricing_method`, `attraction_rate.rate_type`, `vehicle.method`, `guide.guide_type`, `driver.role` stay free-text strings in v1; the OpenAPI types them as `string`. Introduce closed enums later, once the full value sets are known.
+- Rate corrections via `PATCH` rely on `created_by` only in v1. A `rate_audit` table (§5.2) is a recommended follow-up, not part of v1.
+
+- AGENT has no access to this service; agents see prices only through quotations (D4). `technical_visit_category` is soft-deleted (D5).
+
+**Still open**
+
+1. **Service-account role name and flow** for `GET /rates/resolve`. `QUOTATION_SERVICE` via Keycloak client-credentials is proposed in §9; it needs a Keycloak client and role created when the quotation service is built.

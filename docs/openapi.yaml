@@ -1,0 +1,2162 @@
+openapi: 3.0.3
+info:
+  title: Master Data Service API
+  version: 0.1.0-draft
+  description: |
+    Master data for Serene Travels tour management: reference lookups, structural aggregates
+    (properties, attractions, restaurants, packages), operational data (vehicles, drivers, guides,
+    promotions) and a single versioned **rate engine** shared by all ten price tables.
+
+    Design rationale and rules (rate semantics, delete behaviour, auth matrix) live in `API-DESIGN.md`.
+
+    Conventions: integer ids; FKs read as `Ref` objects and written as plain ids; lists are Spring pages
+    (`sort=name,asc`, repeatable); errors are RFC 7807 `application/problem+json`; `createdBy` comes from the JWT.
+servers:
+  - url: http://localhost:8080/master-data-service/api/v1/master-data
+    description: Through cloud-gateway
+  - url: http://localhost:8082/api/v1/master-data
+    description: Direct (local)
+security:
+  - bearerAuth: []
+tags:
+  - name: Lookups
+    description: Cold reference data. Fetch once, cache.
+  - name: Properties
+  - name: Attractions
+  - name: Restaurants
+  - name: Packages
+  - name: Vehicles
+  - name: Drivers
+  - name: Guides
+  - name: Promotions
+  - name: Distances & Articles
+  - name: Rates
+    description: One engine for all price tables. ADMIN or MANAGER only; the quotation service account may call resolve.
+  - name: Operations
+    description: Alerts, import and export.
+
+paths:
+  # ---------------------------------------------------------------- lookups
+  /lookups:
+    get:
+      tags: [Lookups]
+      operationId: getLookups
+      summary: All reference lookups in one response (bootstrap for dropdowns)
+      description: Returns ETag and Cache-Control (max-age=300). Send If-None-Match to get 304.
+      parameters:
+        - $ref: '#/components/parameters/IncludeInactive'
+      responses:
+        '200':
+          description: Bundle of all lookups
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LookupBundle' }
+        '304': { description: Not modified }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /lookups/{name}:
+    parameters:
+      - $ref: '#/components/parameters/LookupName'
+    get:
+      tags: [Lookups]
+      operationId: listLookup
+      summary: One lookup list
+      parameters:
+        - $ref: '#/components/parameters/IncludeInactive'
+      responses:
+        '200':
+          description: Items
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/LookupItem' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Lookups]
+      operationId: createLookupItem
+      summary: Add a lookup item (ADMIN, MANAGER)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LookupItemInput' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LookupItem' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /lookups/{name}/{id}:
+    parameters:
+      - $ref: '#/components/parameters/LookupName'
+      - $ref: '#/components/parameters/Id'
+    patch:
+      tags: [Lookups]
+      operationId: updateLookupItem
+      summary: Edit a lookup item (ADMIN, MANAGER)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LookupItemInput' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LookupItem' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Lookups]
+      operationId: deleteLookupItem
+      summary: Delete a lookup item (409 IN_USE if referenced). technical-visit-categories is soft-deleted (active=false) instead.
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ---------------------------------------------------------------- properties
+  /properties:
+    get:
+      tags: [Properties]
+      operationId: listProperties
+      summary: List properties (summary rows)
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Q'
+        - $ref: '#/components/parameters/DestinationId'
+        - $ref: '#/components/parameters/Active'
+        - { name: starRating, in: query, schema: { type: integer, minimum: 1, maximum: 5 } }
+        - $ref: '#/components/parameters/At'
+      responses:
+        '200':
+          description: Page of properties
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PropertyPage' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Properties]
+      operationId: createProperty
+      summary: Create a property
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PropertyInput' }
+      responses:
+        '201':
+          description: Created
+          headers:
+            Location: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Property' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /properties/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Properties]
+      operationId: getProperty
+      summary: Full property aggregate
+      parameters:
+        - { name: include, in: query, description: 'Optional heavy parts', schema: { type: array, items: { type: string, enum: [rates] } }, style: form, explode: false }
+        - $ref: '#/components/parameters/At'
+      responses:
+        '200':
+          description: Property
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Property' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Properties]
+      operationId: updateProperty
+      summary: Quick edit - send only changed fields
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PropertyPatch' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Property' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [Properties]
+      operationId: deactivateProperty
+      summary: Soft delete (active=false)
+      responses:
+        '204': { description: Deactivated }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /properties/{id}/room-types:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Properties]
+      operationId: addRoomType
+      summary: Add a room type
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RoomTypeInput' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoomType' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /room-types/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    patch:
+      tags: [Properties]
+      operationId: updateRoomType
+      summary: Edit a room type
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RoomTypeInput' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoomType' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Properties]
+      operationId: deleteRoomType
+      summary: Delete a room type (409 IN_USE if rates reference it)
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /properties/{id}/child-rules:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    put:
+      tags: [Properties]
+      operationId: replaceChildRules
+      summary: Replace the full set of child rules
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { $ref: '#/components/schemas/ChildRuleInput' }
+      responses:
+        '200':
+          description: New set
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ChildRule' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /properties/{id}/inclusions:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    put:
+      tags: [Properties]
+      operationId: replacePropertyInclusions
+      summary: Replace the full set of inclusions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { $ref: '#/components/schemas/PropertyInclusionInput' }
+      responses:
+        '200':
+          description: New set
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PropertyInclusion' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /properties/{id}/dietary:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    put:
+      tags: [Properties]
+      operationId: replacePropertyDietary
+      summary: Replace dietary support for the property
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { $ref: '#/components/schemas/DietarySupportInput' }
+      responses:
+        '200':
+          description: New set
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/DietarySupport' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /properties/{id}/baby-cot:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    put:
+      tags: [Properties]
+      operationId: setBabyCot
+      summary: Set baby cot availability and cost
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BabyCot' }
+      responses:
+        '200':
+          description: Saved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BabyCot' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /properties/{id}/rates:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    put:
+      tags: [Properties, Rates]
+      operationId: saveRateGrid
+      summary: Save the room type x season x nationality x occupancy grid atomically
+      description: Each item is applied with the same rules as PUT /rates/property; the whole request is all-or-nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { $ref: '#/components/schemas/RateWrite' }
+      responses:
+        '200':
+          description: Resulting current rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/RateRow' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ---------------------------------------------------------------- attractions
+  /attractions:
+    get:
+      tags: [Attractions]
+      operationId: listAttractions
+      summary: List attractions
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Q'
+        - $ref: '#/components/parameters/DestinationId'
+        - { name: isSafari, in: query, schema: { type: boolean } }
+        - $ref: '#/components/parameters/At'
+      responses:
+        '200':
+          description: Page of attractions
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AttractionPage' }
+    post:
+      tags: [Attractions]
+      operationId: createAttraction
+      summary: Create an attraction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttractionInput' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Attraction' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /attractions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Attractions]
+      operationId: getAttraction
+      summary: Attraction with current rates and tuk-tuk fare
+      parameters:
+        - $ref: '#/components/parameters/At'
+      responses:
+        '200':
+          description: Attraction
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Attraction' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Attractions]
+      operationId: updateAttraction
+      summary: Quick edit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttractionInput' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Attraction' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [Attractions]
+      operationId: deleteAttraction
+      summary: Delete (409 IN_USE if referenced)
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ---------------------------------------------------------------- restaurants
+  /restaurants:
+    get:
+      tags: [Restaurants]
+      operationId: listRestaurants
+      summary: List restaurants
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Q'
+        - $ref: '#/components/parameters/DestinationId'
+      responses:
+        '200':
+          description: Page of restaurants
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RestaurantPage' }
+    post:
+      tags: [Restaurants]
+      operationId: createRestaurant
+      summary: Create a restaurant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RestaurantInput' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Restaurant' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /restaurants/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Restaurants]
+      operationId: getRestaurant
+      summary: Restaurant with closed days and dietary support
+      responses:
+        '200':
+          description: Restaurant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Restaurant' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Restaurants]
+      operationId: updateRestaurant
+      summary: Quick edit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RestaurantInput' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Restaurant' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Restaurants]
+      operationId: deleteRestaurant
+      summary: Delete
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /restaurants/{id}/closed-days:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    put:
+      tags: [Restaurants]
+      operationId: replaceRestaurantClosedDays
+      summary: Replace closed days (ISO weekday 1=Mon..7=Sun)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { type: integer, minimum: 1, maximum: 7 }
+      responses:
+        '200':
+          description: New set
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: integer }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /restaurants/{id}/dietary:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    put:
+      tags: [Restaurants]
+      operationId: replaceRestaurantDietary
+      summary: Replace dietary categories the restaurant supports
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { type: integer, description: dietary_category id }
+      responses:
+        '200':
+          description: New set
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Ref' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- packages
+  /packages:
+    get:
+      tags: [Packages]
+      operationId: listPackages
+      summary: List site tour packages
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Q'
+        - $ref: '#/components/parameters/At'
+      responses:
+        '200':
+          description: Page of packages
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PackagePage' }
+    post:
+      tags: [Packages]
+      operationId: createPackage
+      summary: Create a package
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PackageInput' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Package' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /packages/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Packages]
+      operationId: getPackage
+      summary: Package with sites and current rate
+      parameters:
+        - $ref: '#/components/parameters/At'
+      responses:
+        '200':
+          description: Package
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Package' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Packages]
+      operationId: updatePackage
+      summary: Quick edit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PackageInput' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Package' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Packages]
+      operationId: deletePackage
+      summary: Delete
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /packages/{id}/sites:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    put:
+      tags: [Packages]
+      operationId: replacePackageSites
+      summary: Replace the attractions included in the package
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { type: integer, description: attraction id }
+      responses:
+        '200':
+          description: New set
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Ref' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- vehicles / drivers / guides
+  /vehicles:
+    get:
+      tags: [Vehicles]
+      operationId: listVehicles
+      summary: List vehicles
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Q'
+        - $ref: '#/components/parameters/Active'
+        - { name: vehicleTypeId, in: query, schema: { type: integer } }
+        - { name: expiringWithinDays, in: query, description: 'Insurance or revenue licence expires within N days', schema: { type: integer, minimum: 0 } }
+      responses:
+        '200':
+          description: Page of vehicles
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VehiclePage' }
+    post:
+      tags: [Vehicles]
+      operationId: createVehicle
+      summary: Create a vehicle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/VehicleInput' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Vehicle' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /vehicles/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Vehicles]
+      operationId: getVehicle
+      summary: Vehicle with type, driver, assistant and expiry warnings
+      responses:
+        '200':
+          description: Vehicle
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Vehicle' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Vehicles]
+      operationId: updateVehicle
+      summary: Quick edit (e.g. renew insurance expiry, change driver)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/VehicleInput' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Vehicle' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [Vehicles]
+      operationId: deactivateVehicle
+      summary: Soft delete (active=false)
+      responses:
+        '204': { description: Deactivated }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /drivers:
+    get:
+      tags: [Drivers]
+      operationId: listDrivers
+      summary: List drivers
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Q'
+        - $ref: '#/components/parameters/Active'
+        - { name: isChauffeur, in: query, schema: { type: boolean } }
+      responses:
+        '200':
+          description: Page of drivers
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DriverPage' }
+    post:
+      tags: [Drivers]
+      operationId: createDriver
+      summary: Create a driver
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DriverInput' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Driver' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /drivers/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Drivers]
+      operationId: getDriver
+      summary: Get a driver
+      responses:
+        '200':
+          description: Driver
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Driver' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Drivers]
+      operationId: updateDriver
+      summary: Quick edit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DriverInput' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Driver' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Drivers]
+      operationId: deactivateDriver
+      summary: Soft delete (active=false)
+      responses:
+        '204': { description: Deactivated }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /guides:
+    get:
+      tags: [Guides]
+      operationId: listGuides
+      summary: List guides
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Q'
+        - $ref: '#/components/parameters/Active'
+        - { name: guideType, in: query, schema: { type: string } }
+        - { name: languageId, in: query, schema: { type: integer } }
+      responses:
+        '200':
+          description: Page of guides
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GuidePage' }
+    post:
+      tags: [Guides]
+      operationId: createGuide
+      summary: Create a guide
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GuideInput' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Guide' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /guides/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Guides]
+      operationId: getGuide
+      summary: Guide with languages
+      responses:
+        '200':
+          description: Guide
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Guide' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Guides]
+      operationId: updateGuide
+      summary: Quick edit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GuideInput' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Guide' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Guides]
+      operationId: deactivateGuide
+      summary: Soft delete (active=false)
+      responses:
+        '204': { description: Deactivated }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /guides/{id}/languages:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    put:
+      tags: [Guides]
+      operationId: replaceGuideLanguages
+      summary: Replace the languages a guide speaks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { type: integer, description: language id }
+      responses:
+        '200':
+          description: New set
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Ref' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- promotions
+  /promotions:
+    get:
+      tags: [Promotions]
+      operationId: listPromotions
+      summary: List promotions
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Q'
+        - $ref: '#/components/parameters/Active'
+        - { name: validOn, in: query, description: 'Only promotions valid on this date', schema: { type: string, format: date } }
+        - $ref: '#/components/parameters/DestinationId'
+      responses:
+        '200':
+          description: Page of promotions
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PromotionPage' }
+    post:
+      tags: [Promotions]
+      operationId: createPromotion
+      summary: Create a promotion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PromotionInput' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Promotion' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /promotions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Promotions]
+      operationId: getPromotion
+      summary: Promotion with current value
+      parameters:
+        - $ref: '#/components/parameters/At'
+      responses:
+        '200':
+          description: Promotion
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Promotion' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Promotions]
+      operationId: updatePromotion
+      summary: Quick edit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PromotionInput' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Promotion' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Promotions]
+      operationId: deactivatePromotion
+      summary: Soft delete (active=false)
+      responses:
+        '204': { description: Deactivated }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- distances & articles
+  /location-distances:
+    get:
+      tags: [Distances & Articles]
+      operationId: listLocationDistances
+      summary: List distances between destinations
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+        - { name: fromDestinationId, in: query, schema: { type: integer } }
+        - { name: toDestinationId, in: query, schema: { type: integer } }
+      responses:
+        '200':
+          description: Page of distances
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LocationDistancePage' }
+    post:
+      tags: [Distances & Articles]
+      operationId: createLocationDistance
+      summary: Add a distance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LocationDistanceInput' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LocationDistance' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /location-distances/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    patch:
+      tags: [Distances & Articles]
+      operationId: updateLocationDistance
+      summary: Quick edit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LocationDistanceInput' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LocationDistance' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Distances & Articles]
+      operationId: deleteLocationDistance
+      summary: Delete
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /info-articles:
+    get:
+      tags: [Distances & Articles]
+      operationId: listInfoArticles
+      summary: List info articles
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Q'
+        - $ref: '#/components/parameters/DestinationId'
+        - { name: category, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: Page of articles
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InfoArticlePage' }
+    post:
+      tags: [Distances & Articles]
+      operationId: createInfoArticle
+      summary: Create an article
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InfoArticleInput' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InfoArticle' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /info-articles/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Distances & Articles]
+      operationId: getInfoArticle
+      summary: Get an article (full body)
+      responses:
+        '200':
+          description: Article
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InfoArticle' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Distances & Articles]
+      operationId: updateInfoArticle
+      summary: Quick edit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InfoArticleInput' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InfoArticle' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Distances & Articles]
+      operationId: deleteInfoArticle
+      summary: Delete
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- rates
+  /rates/families:
+    get:
+      tags: [Rates]
+      operationId: listRateFamilies
+      summary: Rate family registry (keys, unit, nullable-key meaning) - drives generic rate UIs
+      responses:
+        '200':
+          description: Families
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/RateFamily' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /rates/resolve:
+    get:
+      tags: [Rates]
+      operationId: resolveRate
+      summary: Resolve the single applicable price (used by the booking/quote service)
+      description: |
+        Tries the exact key first, then falls back to the row where a nullable "applies to all" key
+        (e.g. nationality) is NULL. 404 NO_RATE when neither exists.
+      parameters:
+        - { name: family, in: query, required: true, schema: { $ref: '#/components/schemas/RateFamilyName' } }
+        - $ref: '#/components/parameters/At'
+        - name: keys
+          in: query
+          required: true
+          description: 'Key fields for the family, e.g. keys[propertyId]=42&keys[roomTypeId]=1&keys[seasonId]=1&keys[occupancy]=2&keys[nationalityId]=9'
+          style: deepObject
+          explode: true
+          schema: { $ref: '#/components/schemas/RateKeys' }
+      responses:
+        '200':
+          description: Resolved price
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResolvedRate' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /rates/{family}:
+    parameters:
+      - $ref: '#/components/parameters/Family'
+    get:
+      tags: [Rates]
+      operationId: listRates
+      summary: Rates for a subset of keys (add history=true for the audit/history view)
+      parameters:
+        - name: filter
+          in: query
+          description: 'Key filters, e.g. filter[propertyId]=42&filter[seasonId]=1'
+          style: deepObject
+          explode: true
+          schema: { $ref: '#/components/schemas/RateKeys' }
+        - $ref: '#/components/parameters/At'
+        - { name: history, in: query, description: 'Include closed (past) rows', schema: { type: boolean, default: false } }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+      responses:
+        '200':
+          description: Page of rate rows
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RateRowPage' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [Rates]
+      operationId: setRate
+      summary: Set a rate (closes the open row, inserts a new one)
+      description: |
+        effectiveFrom defaults to today. Half-open intervals [from, to). 409 RATE_STARTS_BEFORE_CURRENT if
+        effectiveFrom <= the open row's start; 409 FUTURE_RATE_EXISTS if a pending future row exists.
+        Vehicle family: omit keys.seasonId to write every season in one transaction.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RateWrite' }
+      responses:
+        '200':
+          description: New current row(s)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/RateRow' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /rates/{family}/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Family'
+      - $ref: '#/components/parameters/Id'
+    patch:
+      tags: [Rates]
+      operationId: correctRate
+      summary: Correct a row in place (typo fix)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RateCorrection' }
+      responses:
+        '200':
+          description: Corrected row
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RateRow' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [Rates]
+      operationId: deletePendingRate
+      summary: Delete a pending future-dated row (history is never deleted)
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /rates/{family}/adjust:
+    parameters:
+      - $ref: '#/components/parameters/Family'
+    post:
+      tags: [Rates]
+      operationId: adjustRates
+      summary: Bulk percent/amount change with preview (dryRun)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RateAdjustRequest' }
+      responses:
+        '200':
+          description: Preview (dryRun=true) or applied changes (dryRun=false)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/RateAdjustItem' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ---------------------------------------------------------------- operations
+  /alerts:
+    get:
+      tags: [Operations]
+      operationId: listAlerts
+      summary: Things needing attention (expiries, vehicles without drivers, rates ending soon, properties with no current rate)
+      parameters:
+        - { name: withinDays, in: query, schema: { type: integer, minimum: 1, default: 30 } }
+      responses:
+        '200':
+          description: Alerts, most urgent first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Alert' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /import/{table}/template:
+    parameters:
+      - $ref: '#/components/parameters/Table'
+    get:
+      tags: [Operations]
+      operationId: downloadImportTemplate
+      summary: Download the .xlsx template for a table
+      responses:
+        '200':
+          description: Template workbook
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /import/{table}:
+    parameters:
+      - $ref: '#/components/parameters/Table'
+    post:
+      tags: [Operations]
+      operationId: importTable
+      summary: Upload .xlsx/.csv. dryRun=true validates only; dryRun=false commits atomically
+      parameters:
+        - { name: dryRun, in: query, schema: { type: boolean, default: true } }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        '200':
+          description: Import result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImportResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /export/{table}:
+    parameters:
+      - $ref: '#/components/parameters/Table'
+    get:
+      tags: [Operations]
+      operationId: exportTable
+      summary: Download current data
+      parameters:
+        - { name: format, in: query, schema: { type: string, enum: [xlsx, csv], default: xlsx } }
+      responses:
+        '200':
+          description: File
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema: { type: string, format: binary }
+            text/csv:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Keycloak access token (realm serenetravels). This is an internal service: every endpoint needs ADMIN or MANAGER;
+        AGENT is never accepted. GET /rates/resolve additionally accepts the QUOTATION_SERVICE service account.
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer }
+    Page:
+      name: page
+      in: query
+      description: Zero-based page index
+      schema: { type: integer, minimum: 0, default: 0 }
+    Size:
+      name: size
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 20 }
+    Sort:
+      name: sort
+      in: query
+      description: 'property,direction - repeatable. Example: sort=name,asc'
+      schema: { type: array, items: { type: string, example: 'name,asc' } }
+      style: form
+      explode: true
+    Q:
+      name: q
+      in: query
+      description: Case-insensitive contains match on name/code
+      schema: { type: string }
+    Active:
+      name: active
+      in: query
+      schema: { type: boolean }
+    DestinationId:
+      name: destinationId
+      in: query
+      schema: { type: integer }
+    At:
+      name: at
+      in: query
+      description: Evaluate current rates as of this date (default today)
+      schema: { type: string, format: date }
+    IncludeInactive:
+      name: includeInactive
+      in: query
+      description: Include soft-deleted items (only technical-visit-categories has them)
+      schema: { type: boolean, default: false }
+    LookupName:
+      name: name
+      in: path
+      required: true
+      schema:
+        type: string
+        enum: [destinations, nationalities, languages, seasons, dietary-categories, meal-plans, hotel-inclusions, misc-cost-types, vehicle-types, tax-rates, technical-visit-categories]
+    Family:
+      name: family
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/RateFamilyName' }
+    Table:
+      name: table
+      in: path
+      required: true
+      schema:
+        type: string
+        enum: [nationalities, transport-rates, guide-accommodation-rates, attractions, vehicle-rates, misc-cost-rates, property-dietary, property-child-rules, restaurants, site-tour-packages, promotions, properties, vehicles, drivers, guides]
+
+  responses:
+    BadRequest:
+      description: Validation failed (fieldErrors populated)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Missing or invalid token
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Forbidden:
+      description: Role not allowed
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Not found
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: IN_USE, VERSION_CONFLICT, RATE_STARTS_BEFORE_CURRENT, FUTURE_RATE_EXISTS or duplicate
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    # ------------------------------------------------------------ shared
+    Ref:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: integer, example: 7 }
+        name: { type: string, example: Habarana }
+    Problem:
+      type: object
+      required: [title, status, code]
+      properties:
+        type: { type: string, example: 'about:blank' }
+        title: { type: string, example: Validation failed }
+        status: { type: integer, example: 400 }
+        code:
+          type: string
+          enum: [VALIDATION_ERROR, NOT_FOUND, IN_USE, VERSION_CONFLICT, RATE_STARTS_BEFORE_CURRENT, FUTURE_RATE_EXISTS, NO_RATE, IMPORT_INVALID, FORBIDDEN]
+        detail: { type: string }
+        fieldErrors:
+          type: object
+          additionalProperties: { type: string }
+          example: { rate: must be greater than 0 }
+    PageMeta:
+      type: object
+      properties:
+        totalElements: { type: integer, format: int64 }
+        totalPages: { type: integer }
+        number: { type: integer }
+        size: { type: integer }
+        first: { type: boolean }
+        last: { type: boolean }
+        empty: { type: boolean }
+    Money:
+      type: number
+      format: double
+      minimum: 0
+      example: 185.0
+
+    # ------------------------------------------------------------ lookups
+    LookupItem:
+      type: object
+      description: Common shape; each lookup adds its own fields (see LookupBundle).
+      required: [id, name]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        code: { type: string, nullable: true }
+      additionalProperties: true
+    LookupItemInput:
+      type: object
+      properties:
+        name: { type: string }
+        code: { type: string }
+      additionalProperties: true
+    LookupBundle:
+      type: object
+      properties:
+        destinations:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/Ref'
+              - type: object
+                properties:
+                  region: { type: string, nullable: true }
+                  country: { type: string }
+        nationalities:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/Ref'
+              - type: object
+                properties:
+                  isoCode: { type: string }
+        seasons:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/Ref'
+              - type: object
+                properties:
+                  startDate: { type: string, format: date }
+                  endDate: { type: string, format: date }
+        vehicleTypes:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/Ref'
+              - type: object
+                properties:
+                  minCapacity: { type: integer }
+                  maxCapacity: { type: integer }
+        languages: { type: array, items: { $ref: '#/components/schemas/Ref' } }
+        dietaryCategories: { type: array, items: { $ref: '#/components/schemas/Ref' } }
+        mealPlans:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/Ref'
+              - type: object
+                properties:
+                  code: { type: string }
+        hotelInclusions:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/Ref'
+              - type: object
+                properties:
+                  description: { type: string, nullable: true }
+        miscCostTypes: { type: array, items: { $ref: '#/components/schemas/Ref' } }
+        taxRates: { type: array, items: { $ref: '#/components/schemas/Ref' } }
+        technicalVisitCategories:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/Ref'
+              - type: object
+                properties:
+                  active: { type: boolean }
+
+    # ------------------------------------------------------------ properties
+    PropertySummary:
+      type: object
+      properties:
+        id: { type: integer }
+        code: { type: string, example: HTL-0042 }
+        name: { type: string }
+        active: { type: boolean }
+        starRating: { type: integer, nullable: true }
+        destination: { $ref: '#/components/schemas/Ref' }
+        roomTypeCount: { type: integer }
+        fromRate:
+          allOf:
+            - $ref: '#/components/schemas/RateAmount'
+          nullable: true
+    PropertyPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            content:
+              type: array
+              items: { $ref: '#/components/schemas/PropertySummary' }
+    Property:
+      type: object
+      properties:
+        id: { type: integer }
+        code: { type: string }
+        name: { type: string }
+        active: { type: boolean }
+        starRating: { type: integer, nullable: true }
+        address: { type: string, nullable: true }
+        website: { type: string, nullable: true }
+        email: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+        destination: { $ref: '#/components/schemas/Ref' }
+        roomTypes: { type: array, items: { $ref: '#/components/schemas/RoomType' } }
+        childRules: { type: array, items: { $ref: '#/components/schemas/ChildRule' } }
+        inclusions: { type: array, items: { $ref: '#/components/schemas/PropertyInclusion' } }
+        babyCot: { $ref: '#/components/schemas/BabyCot' }
+        dietary: { type: array, items: { $ref: '#/components/schemas/DietarySupport' } }
+        rates:
+          type: array
+          nullable: true
+          description: Only present with include=rates
+          items: { $ref: '#/components/schemas/RateRow' }
+        version: { type: integer }
+    PropertyInput:
+      type: object
+      required: [code, name, destinationId]
+      properties:
+        code: { type: string }
+        name: { type: string }
+        destinationId: { type: integer }
+        address: { type: string }
+        starRating: { type: integer, minimum: 1, maximum: 5 }
+        website: { type: string }
+        email: { type: string, format: email }
+        phone: { type: string }
+        active: { type: boolean }
+    PropertyPatch:
+      allOf:
+        - type: object
+          properties:
+            version: { type: integer, description: Optional optimistic-lock token }
+        - type: object
+          description: Any subset of PropertyInput fields
+          properties:
+            code: { type: string }
+            name: { type: string }
+            destinationId: { type: integer }
+            address: { type: string }
+            starRating: { type: integer }
+            website: { type: string }
+            email: { type: string }
+            phone: { type: string }
+            active: { type: boolean }
+    RoomType:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        baseCapacity: { type: integer, nullable: true }
+        extraBedAllowed: { type: boolean }
+    RoomTypeInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        baseCapacity: { type: integer }
+        extraBedAllowed: { type: boolean, default: false }
+    ChildRule:
+      allOf:
+        - $ref: '#/components/schemas/ChildRuleInput'
+        - type: object
+          properties:
+            id: { type: integer }
+    ChildRuleInput:
+      type: object
+      required: [minAge, maxAge, requiresBed, cost]
+      properties:
+        minAge: { type: integer }
+        maxAge: { type: integer }
+        requiresBed: { type: boolean }
+        cost: { $ref: '#/components/schemas/Money' }
+    PropertyInclusion:
+      type: object
+      properties:
+        inclusion: { $ref: '#/components/schemas/Ref' }
+        cost: { type: number, nullable: true, description: 'null = included free' }
+    PropertyInclusionInput:
+      type: object
+      required: [inclusionId]
+      properties:
+        inclusionId: { type: integer }
+        cost: { type: number, nullable: true }
+    BabyCot:
+      type: object
+      required: [available]
+      properties:
+        available: { type: boolean }
+        cost: { type: number, nullable: true }
+    DietarySupport:
+      type: object
+      properties:
+        category: { $ref: '#/components/schemas/Ref' }
+        supported: { type: boolean }
+    DietarySupportInput:
+      type: object
+      required: [dietaryCategoryId, supported]
+      properties:
+        dietaryCategoryId: { type: integer }
+        supported: { type: boolean }
+
+    # ------------------------------------------------------------ attractions
+    Attraction:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        destination: { $ref: '#/components/schemas/Ref' }
+        pricingMethod: { type: string, description: 'Free text today; agree a closed enum' }
+        isSafari: { type: boolean }
+        jeepCapacity: { type: integer, nullable: true }
+        fixedGroupSize: { type: integer, nullable: true }
+        currentRates: { type: array, items: { $ref: '#/components/schemas/RateRow' } }
+        tukTuk:
+          nullable: true
+          type: object
+          properties:
+            locationId: { type: integer }
+            currentFare: { $ref: '#/components/schemas/RateAmount' }
+    AttractionInput:
+      type: object
+      properties:
+        name: { type: string }
+        destinationId: { type: integer }
+        pricingMethod: { type: string }
+        isSafari: { type: boolean }
+        jeepCapacity: { type: integer }
+        fixedGroupSize: { type: integer }
+    AttractionPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            content:
+              type: array
+              items: { $ref: '#/components/schemas/Attraction' }
+
+    # ------------------------------------------------------------ restaurants
+    Restaurant:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        destination: { $ref: '#/components/schemas/Ref' }
+        closedDays:
+          type: array
+          description: ISO weekday numbers, 1=Monday .. 7=Sunday
+          items: { type: integer, minimum: 1, maximum: 7 }
+        dietary: { type: array, items: { $ref: '#/components/schemas/Ref' } }
+    RestaurantInput:
+      type: object
+      properties:
+        name: { type: string }
+        destinationId: { type: integer }
+    RestaurantPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            content:
+              type: array
+              items: { $ref: '#/components/schemas/Restaurant' }
+
+    # ------------------------------------------------------------ packages
+    Package:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        sites: { type: array, items: { $ref: '#/components/schemas/Ref' } }
+        currentRate:
+          allOf:
+            - $ref: '#/components/schemas/RateAmount'
+          nullable: true
+    PackageInput:
+      type: object
+      properties:
+        name: { type: string }
+    PackagePage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            content:
+              type: array
+              items: { $ref: '#/components/schemas/Package' }
+
+    # ------------------------------------------------------------ vehicles / drivers / guides
+    Vehicle:
+      type: object
+      properties:
+        id: { type: integer }
+        registrationNo: { type: string }
+        vehicleType: { $ref: '#/components/schemas/Ref' }
+        seatingCapacity: { type: integer }
+        method: { type: string, description: 'Free text today (e.g. OWNED / HIRED); agree a closed enum' }
+        ownerName: { type: string, nullable: true }
+        insuranceCompany: { type: string, nullable: true }
+        policyNumber: { type: string, nullable: true }
+        insuranceExpiryDate: { type: string, format: date, nullable: true }
+        revenueLicenseExpiryDate: { type: string, format: date, nullable: true }
+        driver:
+          allOf:
+            - $ref: '#/components/schemas/Ref'
+          nullable: true
+        assistant:
+          allOf:
+            - $ref: '#/components/schemas/Ref'
+          nullable: true
+        active: { type: boolean }
+        warnings:
+          type: array
+          items:
+            type: object
+            properties:
+              code: { type: string, enum: [INSURANCE_EXPIRING, INSURANCE_EXPIRED, LICENSE_EXPIRING, LICENSE_EXPIRED, NO_DRIVER] }
+              daysLeft: { type: integer, nullable: true }
+        version: { type: integer }
+    VehicleInput:
+      type: object
+      properties:
+        registrationNo: { type: string }
+        vehicleTypeId: { type: integer }
+        seatingCapacity: { type: integer }
+        method: { type: string }
+        ownerName: { type: string }
+        insuranceCompany: { type: string }
+        policyNumber: { type: string }
+        insuranceExpiryDate: { type: string, format: date }
+        revenueLicenseExpiryDate: { type: string, format: date }
+        driverId: { type: integer, nullable: true }
+        assistantId: { type: integer, nullable: true }
+        active: { type: boolean }
+        version: { type: integer }
+    VehiclePage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            content:
+              type: array
+              items: { $ref: '#/components/schemas/Vehicle' }
+    Driver:
+      type: object
+      properties:
+        id: { type: integer }
+        title: { type: string, nullable: true }
+        name: { type: string }
+        nameWithInitials: { type: string, nullable: true }
+        shortname: { type: string, nullable: true }
+        gender: { type: string, nullable: true }
+        nic: { type: string }
+        dateOfBirth: { type: string, format: date, nullable: true }
+        address: { type: string, nullable: true }
+        contact: { type: string, nullable: true }
+        mobile2: { type: string, nullable: true }
+        licenseNo: { type: string, nullable: true }
+        role: { type: string, description: 'Free text today; agree a closed enum' }
+        isChauffeur: { type: boolean }
+        active: { type: boolean }
+        version: { type: integer }
+    DriverInput:
+      type: object
+      properties:
+        title: { type: string }
+        name: { type: string }
+        nameWithInitials: { type: string }
+        shortname: { type: string }
+        gender: { type: string }
+        nic: { type: string }
+        dateOfBirth: { type: string, format: date }
+        address: { type: string }
+        contact: { type: string }
+        mobile2: { type: string }
+        licenseNo: { type: string }
+        role: { type: string }
+        isChauffeur: { type: boolean }
+        active: { type: boolean }
+        version: { type: integer }
+    DriverPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            content:
+              type: array
+              items: { $ref: '#/components/schemas/Driver' }
+    Guide:
+      type: object
+      properties:
+        id: { type: integer }
+        guideNo: { type: string }
+        name: { type: string }
+        nickname: { type: string, nullable: true }
+        guideType: { type: string, description: 'Free text today; agree a closed enum' }
+        nic: { type: string, nullable: true }
+        contact: { type: string, nullable: true }
+        email: { type: string, nullable: true }
+        address: { type: string, nullable: true }
+        town: { type: string, nullable: true }
+        languages: { type: array, items: { $ref: '#/components/schemas/Ref' } }
+        active: { type: boolean }
+        version: { type: integer }
+    GuideInput:
+      type: object
+      properties:
+        guideNo: { type: string }
+        name: { type: string }
+        nickname: { type: string }
+        guideType: { type: string }
+        nic: { type: string }
+        contact: { type: string }
+        email: { type: string }
+        address: { type: string }
+        town: { type: string }
+        active: { type: boolean }
+        version: { type: integer }
+    GuidePage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            content:
+              type: array
+              items: { $ref: '#/components/schemas/Guide' }
+
+    # ------------------------------------------------------------ promotions / distances / articles
+    Promotion:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        type: { type: string, description: 'Free text today; determines whether the value is USD or PERCENT' }
+        validFrom: { type: string, format: date }
+        validTo: { type: string, format: date }
+        minGroupSize: { type: integer, nullable: true }
+        destination:
+          allOf:
+            - $ref: '#/components/schemas/Ref'
+          nullable: true
+        season:
+          allOf:
+            - $ref: '#/components/schemas/Ref'
+          nullable: true
+        active: { type: boolean }
+        currentValue:
+          allOf:
+            - $ref: '#/components/schemas/RateAmount'
+          nullable: true
+    PromotionInput:
+      type: object
+      properties:
+        name: { type: string }
+        type: { type: string }
+        validFrom: { type: string, format: date }
+        validTo: { type: string, format: date }
+        minGroupSize: { type: integer }
+        destinationId: { type: integer, nullable: true }
+        seasonId: { type: integer, nullable: true }
+        active: { type: boolean }
+    PromotionPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            content:
+              type: array
+              items: { $ref: '#/components/schemas/Promotion' }
+    LocationDistance:
+      type: object
+      properties:
+        id: { type: integer }
+        from: { $ref: '#/components/schemas/Ref' }
+        to: { $ref: '#/components/schemas/Ref' }
+        routeType: { type: string }
+        distanceKm: { type: number }
+        durationMinutes: { type: integer, nullable: true }
+    LocationDistanceInput:
+      type: object
+      properties:
+        fromDestinationId: { type: integer }
+        toDestinationId: { type: integer }
+        routeType: { type: string }
+        distanceKm: { type: number }
+        durationMinutes: { type: integer }
+    LocationDistancePage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            content:
+              type: array
+              items: { $ref: '#/components/schemas/LocationDistance' }
+    InfoArticle:
+      type: object
+      properties:
+        id: { type: integer }
+        category: { type: string }
+        destination:
+          allOf:
+            - $ref: '#/components/schemas/Ref'
+          nullable: true
+        title: { type: string }
+        body: { type: string, description: Omitted from list rows }
+    InfoArticleInput:
+      type: object
+      properties:
+        category: { type: string }
+        destinationId: { type: integer, nullable: true }
+        title: { type: string }
+        body: { type: string }
+    InfoArticlePage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            content:
+              type: array
+              items: { $ref: '#/components/schemas/InfoArticle' }
+
+    # ------------------------------------------------------------ rates
+    RateFamilyName:
+      type: string
+      enum: [property, vehicle, attraction, guide-accommodation, misc, tuk-tuk, package, tax, promotion, transport]
+    RateUnit:
+      type: string
+      enum: [USD, LKR, PERCENT]
+      description: Fixed per family. USD except vehicle and transport (LKR per km), tuk-tuk (LKR) and tax (PERCENT).
+    RateKeys:
+      type: object
+      description: |
+        Key fields per family. property: propertyId, roomTypeId, seasonId, occupancy, nationalityId?.
+        vehicle: vehicleTypeId, seasonId?. attraction: attractionId, rateType. guide-accommodation: seasonId, destinationId?.
+        misc: miscCostTypeId, nationalityId?. tuk-tuk: tukTukLocationId. package: packageId. tax: taxRateId.
+        promotion: promotionId. transport: none. A null/absent nullable key means "applies to all".
+      additionalProperties:
+        oneOf:
+          - { type: integer }
+          - { type: string }
+        nullable: true
+      example: { propertyId: 42, roomTypeId: 1, seasonId: 1, occupancy: 2, nationalityId: null }
+    RateAmount:
+      type: object
+      properties:
+        rate: { type: number }
+        unit: { $ref: '#/components/schemas/RateUnit' }
+    RateFamily:
+      type: object
+      properties:
+        name: { $ref: '#/components/schemas/RateFamilyName' }
+        label: { type: string, example: Property room rates }
+        unit: { $ref: '#/components/schemas/RateUnit' }
+        perKm: { type: boolean, description: True when the rate is per kilometre }
+        keys:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string, example: nationalityId }
+              label: { type: string, example: Nationality }
+              lookup: { type: string, nullable: true, description: 'Lookup/resource that supplies the choices, e.g. nationalities' }
+              required: { type: boolean }
+              nullMeansAll: { type: boolean }
+    RateRow:
+      type: object
+      properties:
+        id: { type: integer }
+        family: { $ref: '#/components/schemas/RateFamilyName' }
+        keys: { $ref: '#/components/schemas/RateKeys' }
+        labels:
+          type: object
+          description: Display names for the key fields, so a generic grid needs no joins
+          additionalProperties: { type: string, nullable: true }
+          example: { propertyId: Cinnamon Lodge, roomTypeId: Deluxe, seasonId: Summer, nationalityId: null }
+        rate: { type: number }
+        unit: { $ref: '#/components/schemas/RateUnit' }
+        effectiveFrom: { type: string, format: date }
+        effectiveTo: { type: string, format: date, nullable: true, description: 'Exclusive end (half-open interval); null = open' }
+        isCurrent: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        createdBy: { type: string }
+    RateRowPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            content:
+              type: array
+              items: { $ref: '#/components/schemas/RateRow' }
+    RateWrite:
+      type: object
+      required: [keys, rate]
+      properties:
+        keys: { $ref: '#/components/schemas/RateKeys' }
+        rate: { type: number, minimum: 0 }
+        effectiveFrom: { type: string, format: date, description: Defaults to today }
+    RateCorrection:
+      type: object
+      properties:
+        rate: { type: number, minimum: 0 }
+        effectiveFrom: { type: string, format: date }
+        effectiveTo: { type: string, format: date, nullable: true }
+    ResolvedRate:
+      type: object
+      properties:
+        rate: { type: number }
+        unit: { $ref: '#/components/schemas/RateUnit' }
+        matched:
+          type: string
+          enum: [EXACT, FALLBACK_ALL_NATIONALITIES, FALLBACK_ALL_DESTINATIONS]
+        row: { $ref: '#/components/schemas/RateRow' }
+    RateAdjustRequest:
+      type: object
+      required: [filter, mode, value, dryRun]
+      properties:
+        filter:
+          type: object
+          description: Key filters; each value may be a single id or an array of ids
+          additionalProperties: true
+          example: { seasonId: 1, propertyId: [42, 43] }
+        mode: { type: string, enum: [PERCENT, AMOUNT] }
+        value: { type: number, description: 'Signed: 8 = +8% (or +8.00), -5 = -5%' }
+        rounding: { type: string, enum: [NONE, NEAREST_0_01, NEAREST_1], default: NEAREST_0_01 }
+        effectiveFrom: { type: string, format: date }
+        dryRun: { type: boolean }
+    RateAdjustItem:
+      type: object
+      properties:
+        keys: { $ref: '#/components/schemas/RateKeys' }
+        oldRate: { type: number }
+        newRate: { type: number }
+        unit: { $ref: '#/components/schemas/RateUnit' }
+
+    # ------------------------------------------------------------ operations
+    Alert:
+      type: object
+      properties:
+        code:
+          type: string
+          enum: [VEHICLE_INSURANCE_EXPIRING, VEHICLE_LICENSE_EXPIRING, VEHICLE_NO_DRIVER, RATE_ENDING_SOON, PROPERTY_NO_CURRENT_RATE]
+        severity: { type: string, enum: [INFO, WARNING, CRITICAL] }
+        subject: { $ref: '#/components/schemas/Ref' }
+        subjectType: { type: string, example: vehicle }
+        dueDate: { type: string, format: date, nullable: true }
+        daysLeft: { type: integer, nullable: true }
+        message: { type: string }
+    ImportResult:
+      type: object
+      properties:
+        dryRun: { type: boolean }
+        totalRows: { type: integer }
+        valid: { type: integer }
+        invalid: { type: integer }
+        created: { type: integer }
+        updated: { type: integer }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              sheet: { type: string }
+              row: { type: integer }
+              column: { type: string }
+              message: { type: string }
