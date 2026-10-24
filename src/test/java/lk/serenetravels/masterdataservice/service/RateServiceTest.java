@@ -377,6 +377,41 @@ class RateServiceTest {
                 .isInstanceOf(InvalidRequestException.class);
     }
 
+    @Test
+    void attractionRateTypesAreRestrictedToTheAllowedValues() {
+        jdbc.sql("insert into attraction (destination_id, name, pricing_method) values (1, 'Sigiriya Rock', 'PER_PERSON')").update();
+
+        assertThatThrownBy(() -> service.setRate("attraction",
+                write(Map.of("attractionId", 1, "rateType", "Full Ticket"), "35", null), "a"))
+                .isInstanceOfSatisfying(InvalidRequestException.class, e -> assertThat(e.getFieldErrors().get("keys.rateType"))
+                        .contains("must be one of").contains("PER_PERSON").contains("CHILD_DISCOUNT"));
+        assertThatThrownBy(() -> service.list("attraction", Map.of("rateType", "Half Ticket"), null, false, 0, 10))
+                .isInstanceOf(InvalidRequestException.class);
+
+        List<RateRowResponse> saved = service.setRate("attraction",
+                write(Map.of("attractionId", 1, "rateType", "PER_PERSON"), "35", null), "a");
+        assertThat(saved).singleElement().satisfies(r -> {
+            assertThat(r.unit()).isEqualTo(RateUnit.USD);
+            assertThat(r.labels()).containsEntry("attractionId", "Sigiriya Rock");
+        });
+    }
+
+    @Test
+    void theFamilyRegistryPublishesTheAllowedRateTypesAndTheGuideCurrency() {
+        List<RateFamilyResponse> families = service.families();
+
+        RateFamilyResponse attraction = families.stream().filter(f -> f.name().equals("attraction")).findFirst().orElseThrow();
+        assertThat(attraction.keys()).filteredOn(k -> k.name().equals("rateType")).singleElement()
+                .satisfies(k -> assertThat(k.allowedValues()).containsExactly("PER_PERSON", "FIXED_GROUP_BASE",
+                        "EXTRA_PERSON", "GUEST_ENTRY_FEE", "GUIDE_ENTRY_FEE", "CHILD_DISCOUNT", "JEEP_RATE"));
+        assertThat(attraction.keys()).filteredOn(k -> k.name().equals("attractionId")).singleElement()
+                .satisfies(k -> assertThat(k.allowedValues()).isNull());
+
+        // The guide accommodation figures supplied by the business are in LKR.
+        assertThat(families).filteredOn(f -> f.name().equals("guide-accommodation")).singleElement()
+                .satisfies(f -> assertThat(f.unit()).isEqualTo(RateUnit.LKR));
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private static RateWriteRequest write(Map<String, Object> keys, String rate, String from) {

@@ -380,7 +380,8 @@ paths:
         - $ref: '#/components/parameters/Sort'
         - $ref: '#/components/parameters/Q'
         - $ref: '#/components/parameters/DestinationId'
-        - { name: isSafari, in: query, schema: { type: boolean } }
+        - { name: safari, in: query, description: 'Only safari attractions (true) or only non-safari (false)', schema: { type: boolean } }
+        - { name: pricingMethod, in: query, schema: { $ref: '#/components/schemas/PricingMethod' } }
         - $ref: '#/components/parameters/At'
       responses:
         '200':
@@ -447,6 +448,29 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
 
+  /attractions/{id}/tuk-tuk:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    put:
+      tags: [Attractions]
+      operationId: enableTukTuk
+      summary: Give the attraction a tuk-tuk option (idempotent)
+      description: The returned locationId is the key for tuk-tuk fares (PUT /rates/tuk-tuk, keys.tukTukLocationId).
+      responses:
+        '200':
+          description: The tuk-tuk option
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TukTuk' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Attractions]
+      operationId: disableTukTuk
+      summary: Remove the tuk-tuk option (409 IN_USE while fares exist)
+      responses:
+        '204': { description: Removed }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
   # ---------------------------------------------------------------- restaurants
   /restaurants:
     get:
@@ -1701,26 +1725,55 @@ components:
         id: { type: integer }
         name: { type: string }
         destination: { $ref: '#/components/schemas/Ref' }
-        pricingMethod: { type: string, description: 'Free text today; agree a closed enum' }
+        pricingMethod: { $ref: '#/components/schemas/PricingMethod' }
         isSafari: { type: boolean }
         jeepCapacity: { type: integer, nullable: true }
         fixedGroupSize: { type: integer, nullable: true }
         currentRates: { type: array, items: { $ref: '#/components/schemas/RateRow' } }
         tukTuk:
+          allOf:
+            - $ref: '#/components/schemas/TukTuk'
           nullable: true
-          type: object
-          properties:
-            locationId: { type: integer }
-            currentFare: { $ref: '#/components/schemas/RateAmount' }
+    PricingMethod:
+      type: string
+      enum: [PER_PERSON, FIXED_GROUP_PLUS_EXTRA]
+      description: FIXED_GROUP_PLUS_EXTRA needs a fixedGroupSize; PER_PERSON must not have one.
+    TukTuk:
+      type: object
+      properties:
+        locationId: { type: integer, description: 'The key to use when setting a tuk-tuk fare (keys.tukTukLocationId)' }
+        currentFare:
+          allOf:
+            - $ref: '#/components/schemas/RateAmount'
+          nullable: true
+    AttractionRateAmount:
+      type: object
+      properties:
+        rateType: { type: string }
+        rate: { type: number }
+        unit: { $ref: '#/components/schemas/RateUnit' }
+    AttractionSummary:
+      type: object
+      description: A list row. currentRates is compact; GET /attractions/{id} returns full rate rows.
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        destination: { $ref: '#/components/schemas/Ref' }
+        pricingMethod: { $ref: '#/components/schemas/PricingMethod' }
+        isSafari: { type: boolean }
+        jeepCapacity: { type: integer, nullable: true }
+        fixedGroupSize: { type: integer, nullable: true }
+        currentRates: { type: array, items: { $ref: '#/components/schemas/AttractionRateAmount' } }
     AttractionInput:
       type: object
+      description: Required on create - name (unique within its destination), destinationId, pricingMethod. Send null on PATCH to clear jeepCapacity or fixedGroupSize.
       properties:
         name: { type: string }
         destinationId: { type: integer }
-        pricingMethod: { type: string }
-        isSafari: { type: boolean }
-        jeepCapacity: { type: integer }
-        fixedGroupSize: { type: integer }
+        pricingMethod: { $ref: '#/components/schemas/PricingMethod' }
+        isSafari: { type: boolean, default: false }
+        jeepCapacity: { type: integer, minimum: 1, maximum: 50, nullable: true }
+        fixedGroupSize: { type: integer, minimum: 1, maximum: 100, nullable: true }
     AttractionPage:
       allOf:
         - $ref: '#/components/schemas/PageMeta'
@@ -1728,7 +1781,7 @@ components:
           properties:
             content:
               type: array
-              items: { $ref: '#/components/schemas/Attraction' }
+              items: { $ref: '#/components/schemas/AttractionSummary' }
 
     # ------------------------------------------------------------ restaurants
     Restaurant:
@@ -2056,6 +2109,11 @@ components:
               lookup: { type: string, nullable: true, description: 'Lookup/resource that supplies the choices, e.g. nationalities' }
               required: { type: boolean }
               nullMeansAll: { type: boolean }
+              allowedValues:
+                type: array
+                nullable: true
+                items: { type: string }
+                description: Present when the key may only take a fixed set of values (render as a dropdown)
     RateRow:
       type: object
       properties:

@@ -64,7 +64,8 @@ public class RateServiceImpl implements RateService {
                         f.keys().stream()
                                 .map(k -> new RateKeyResponse(k.name(), k.label(), k.lookup(),
                                         // The fan-out key is optional on write (omit = all values).
-                                        k.required() && !k.name().equals(f.fanOutKey()), k.nullMeansAll()))
+                                        k.required() && !k.name().equals(f.fanOutKey()), k.nullMeansAll(),
+                                        k.allowedValues()))
                                 .toList()))
                 .toList();
     }
@@ -397,7 +398,14 @@ public class RateServiceImpl implements RateService {
     }
 
     private Object coerceKey(Key key, Object value, String field) {
-        return key.type() == KeyType.INT ? Coerce.toInt(value, field) : Coerce.toText(value, field);
+        if (key.type() == KeyType.INT) {
+            return Coerce.toInt(value, field);
+        }
+        String text = Coerce.toText(value, field);
+        if (key.allowedValues() != null && !key.allowedValues().contains(text)) {
+            throw InvalidRequestException.field(field, "must be one of " + key.allowedValues());
+        }
+        return text;
     }
 
     // Query-string filter (filter[propertyId]=42). Only the keys given are filtered on; the literal

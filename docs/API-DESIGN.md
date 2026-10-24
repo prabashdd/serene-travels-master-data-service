@@ -16,7 +16,7 @@ Data source: the `tour-management` Postgres schema (41 tables, see [Data model �
 | # | Decision | Consequence |
 |---|---|---|
 | D1 | Vehicle rates keep their `season_id NOT NULL` (3 season rows per vehicle type, same value) | `PUT /rates/vehicle` without a `seasonId` writes **all** season rows in one transaction; the FE only ever sees one rate per vehicle type unless a season is named |
-| D2 | Currency: **USD** for all rates **except** vehicle and transport per-km, and tuk-tuk fares, which are **LKR** | Every rate row carries a `unit` (`USD` / `LKR` / `PERCENT`); fixed per family, exposed by `GET /rates/families` |
+| D2 | Currency: **USD** for all rates **except** vehicle and transport per-km, tuk-tuk fares and guide accommodation, which are **LKR** | Every rate row carries a `unit` (`USD` / `LKR` / `PERCENT`); fixed per family, exposed by `GET /rates/families` |
 | D3 | Writes: **ADMIN and MANAGER** | `hasAnyRole('ADMIN','MANAGER')` on every non-GET |
 | D4 | This is an **internal back-office service**: AGENT has no access at all | Every endpoint requires ADMIN or MANAGER. Agents only ever see a price inside a quotation, which the quotation service builds by calling `GET /rates/resolve` server-to-server; see [§9](#9-authorization) |
 | D5 | `technical_visit_category` is **soft-deleted** (`active=false`) | `DELETE /lookups/technical-visit-categories/{id}` deactivates instead of removing; lookups for it return `active`, and `GET /lookups` returns only active ones unless `?includeInactive=true` |
@@ -61,8 +61,8 @@ Standalone: every lookup, `location-distances`, `info-articles`.
 |---|---|---|---|---|
 | `property` | `property_rate` | `propertyId`, `roomTypeId`, `seasonId`, `occupancy`, `nationalityId?` | USD | nationality |
 | `vehicle` | `vehicle_rate` | `vehicleTypeId`, `seasonId` (optional on write → all seasons) | LKR per km | — |
-| `attraction` | `attraction_rate` | `attractionId`, `rateType` | USD | — |
-| `guide-accommodation` | `guide_accommodation_rate` | `seasonId`, `destinationId?` | USD | destination |
+| `attraction` | `attraction_rate` | `attractionId`, `rateType` (one of `PER_PERSON`, `FIXED_GROUP_BASE`, `EXTRA_PERSON`, `GUEST_ENTRY_FEE`, `GUIDE_ENTRY_FEE`, `CHILD_DISCOUNT`, `JEEP_RATE` - the database's CHECK list) | USD | — |
+| `guide-accommodation` | `guide_accommodation_rate` | `seasonId`, `destinationId?` | LKR | destination |
 | `misc` | `misc_cost_rate` | `miscCostTypeId`, `nationalityId?` | USD | nationality |
 | `tuk-tuk` | `tuk_tuk_fare_rate` | `tukTukLocationId` | LKR | — |
 | `package` | `site_tour_package_rate` | `packageId` | USD | — |
@@ -70,7 +70,7 @@ Standalone: every lookup, `location-distances`, `info-articles`.
 | `promotion` | `promotion_value` | `promotionId` | USD *or* PERCENT by promotion `type` | — |
 | `transport` | `transport_rate_config` | *(none — singleton)* | LKR per km | — |
 
-> Confirmed: `misc`, `package`, `guide-accommodation` are USD; `tuk-tuk` is LKR (D2). The unit is a property of the family registry, so changing one later needs no endpoint changes.
+> Confirmed: `misc` and `package` are USD; `guide-accommodation` and `tuk-tuk` are LKR (D2). The unit is a property of the family registry, so changing one later needs no endpoint changes.
 
 ### 5.2 Semantics (all families)
 
@@ -125,7 +125,7 @@ Paths are relative to `/api/v1/master-data`. Every endpoint, read or write, requ
 | Resource | List / create | Item | Child endpoints |
 |---|---|---|---|
 | **properties** | `GET`/`POST /properties` (`q`, `destinationId`, `active`, `starRating`) | `GET`/`PATCH`/`DELETE /properties/{id}` (`include=rates`) | `POST /properties/{id}/room-types`; `PATCH`/`DELETE /room-types/{id}`; `PUT /properties/{id}/child-rules`; `PUT /properties/{id}/inclusions`; `PUT /properties/{id}/dietary`; `PUT /properties/{id}/baby-cot`; `PUT /properties/{id}/rates` (grid) |
-| **attractions** | `GET`/`POST /attractions` (`q`, `destinationId`, `isSafari`) | `GET`/`PATCH`/`DELETE` | tuk-tuk fare via family `tuk-tuk` |
+| **attractions** | `GET`/`POST /attractions` (`q`, `destinationId`, `safari`, `pricingMethod`) | `GET`/`PATCH`/`DELETE /attractions/{id}` | `PUT`/`DELETE /attractions/{id}/tuk-tuk` give the attraction a tuk-tuk option (returns the `locationId` the fare is keyed by); the fare itself is a `tuk-tuk` rate |
 | **restaurants** | `GET`/`POST /restaurants` | `GET`/`PATCH`/`DELETE` | `PUT /restaurants/{id}/closed-days`; `PUT /restaurants/{id}/dietary` |
 | **packages** | `GET`/`POST /packages` | `GET`/`PATCH`/`DELETE` | `PUT /packages/{id}/sites` |
 | **vehicles** | `GET`/`POST /vehicles` (`q`, `vehicleTypeId`, `active`, `expiringWithinDays`) | `GET`/`PATCH`/`DELETE` | — |
@@ -256,7 +256,8 @@ Master data is an **internal back-office service**. Roles are the ones user-serv
 | Lookups: bundle (ETag), per-lookup list / create / edit / delete, soft delete for technical visit categories | ✅ built |
 | Rate engine: families, list, set (close-and-open, vehicle fan-out), correct, delete pending, adjust (dry run), resolve, property grid save | ✅ built |
 | Hotels: list / search / sort, one-hotel aggregate (`include=rates`), create, quick edit, soft delete, room types, child rules, inclusions, dietary support, baby cot | ✅ built |
-| Aggregates: attractions, restaurants, packages, vehicles, drivers, guides, promotions, distances, articles | ⏳ not built |
+| Attractions: list / search / sort with current prices, one-attraction aggregate, create, quick edit, delete, tuk-tuk option | ✅ built |
+| Aggregates: restaurants, packages, vehicles, drivers, guides, promotions, distances, articles | ⏳ not built |
 | Alerts, import / export | ⏳ not built |
 | Rate list `sort` | Not supported on `GET /rates/{family}`: rows are always newest-first (`effective_from desc`) |
 | Promotion value unit | USD until `promotion.type` has agreed values (a percentage promotion would be PERCENT) |
@@ -267,10 +268,11 @@ Tests: unit and HTTP tests run on in-memory H2 (PostgreSQL mode). `LivePostgresS
 
 **Resolved**
 
+- Attraction list rows carry a compact `currentRates` (`rateType`, `rate`, `unit`) so a table can show prices without a second call; the single-attraction response carries the full rate rows. `FIXED_GROUP_PLUS_EXTRA` attractions must have a `fixedGroupSize`; `PER_PERSON` ones must not. An attraction name is unique within its destination.
 - Currency: `misc` and `package` are USD; `tuk-tuk` is LKR (with vehicle and transport per-km). Tax is PERCENT. **Guide accommodation is LKR** (the supplied data says "LKR 4500") - the rate family in the code still says USD and needs correcting.
 - Rate intervals are half-open `[from, to)`, matching the existing `CHECK (effective_to > effective_from)`. Note that existing seasons use inclusive end dates, so no one should hand-enter `effective_to` as an inclusive last day.
 - `restaurant_closed_day.day_of_week` is ISO (1 = Monday … 7 = Sunday).
-- `attraction.pricing_method`, `attraction_rate.rate_type`, `vehicle.method`, `guide.guide_type`, `driver.role` stay free-text strings in v1; the OpenAPI types them as `string`. Introduce closed enums later, once the full value sets are known.
+- `attraction.pricing_method` (`PER_PERSON` / `FIXED_GROUP_PLUS_EXTRA`) and `attraction_rate.rate_type` (seven values, see §5.1) are closed lists enforced by the database; the API validates them and publishes them (the rate families endpoint lists the allowed rate types). `vehicle.method`, `guide.guide_type`, `driver.role` stay free-text strings in v1. Introduce closed enums later, once the full value sets are known.
 - Rate corrections via `PATCH` rely on `created_by` only in v1. A `rate_audit` table (§5.2) is a recommended follow-up, not part of v1.
 
 - AGENT has no access to this service; agents see prices only through quotations (D4). `technical_visit_category` is soft-deleted (D5).

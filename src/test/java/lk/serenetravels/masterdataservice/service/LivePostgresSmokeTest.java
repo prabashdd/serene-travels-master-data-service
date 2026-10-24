@@ -1,5 +1,7 @@
 package lk.serenetravels.masterdataservice.service;
 
+import lk.serenetravels.masterdataservice.dto.AttractionResponse;
+import lk.serenetravels.masterdataservice.dto.AttractionSummaryResponse;
 import lk.serenetravels.masterdataservice.dto.BabyCotRequest;
 import lk.serenetravels.masterdataservice.dto.ChildRuleRequest;
 import lk.serenetravels.masterdataservice.dto.DietarySupportRequest;
@@ -11,6 +13,7 @@ import lk.serenetravels.masterdataservice.dto.RateRowResponse;
 import lk.serenetravels.masterdataservice.dto.RateWriteRequest;
 import lk.serenetravels.masterdataservice.dto.RoomTypeResponse;
 import lk.serenetravels.masterdataservice.exception.ConflictException;
+import lk.serenetravels.masterdataservice.service.impl.AttractionServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.LookupServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.PropertyServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.RateServiceImpl;
@@ -185,6 +188,81 @@ class LivePostgresSmokeTest {
             hotels.deactivate(created.id());
             assertThat(hotels.get(created.id(), false, null).active()).isFalse();
             hotels.deleteRoomType(room.id());
+
+            // ---- the real tables are exactly as they were
+            for (String table : realTables) {
+                assertThat(count(jdbc, "public." + table)).as(table).isEqualTo(before.get(table));
+            }
+        }
+    }
+
+    @Test
+    void attractionsReadRealDataAndWriteOnlyToSessionLocalCopies() throws Exception {
+        try (SingleConnectionDataSource dataSource = new SingleConnectionDataSource(URL, "postgres", "postgres", true)) {
+            JdbcClient jdbc = JdbcClient.create(dataSource);
+            Clock clock = Clock.system(ZoneId.of("Asia/Colombo"));
+            RateServiceImpl rates = new RateServiceImpl(jdbc, clock);
+            AttractionServiceImpl attractions = new AttractionServiceImpl(jdbc, clock, rates);
+
+            List<String> realTables = List.of("attraction", "attraction_rate", "tuk_tuk_location", "tuk_tuk_fare_rate");
+            Map<String, Long> before = new java.util.LinkedHashMap<>();
+            for (String table : realTables) {
+                before.put(table, count(jdbc, "public." + table));
+            }
+
+            // ---- reads against the real attractions
+            PageResponse<AttractionSummaryResponse> page = attractions.list(null, null, null, null, null, 0, 10);
+            assertThat(page.totalElements()).isEqualTo(before.get("attraction"));
+            assertThat(attractions.list("safari", null, true, null, List.of("name,asc"), 0, 50).content())
+                    .isNotEmpty().allSatisfy(a -> {
+                        assertThat(a.isSafari()).isTrue();
+                        assertThat(a.name().toLowerCase()).contains("safari");
+                    });
+            assertThat(attractions.list(null, null, null, "PER_PERSON", List.of("destination,asc", "name,asc"), 0, 5).content())
+                    .hasSize(5);
+            int anyId = page.content().get(0).id();
+            assertThat(attractions.get(anyId, null).destination().name()).isNotBlank();
+
+            // ---- the real database refuses a pricing method outside its list (the label is not the code)
+            assertThatThrownBy(() -> jdbc.sql("insert into public.attraction (destination_id, name, pricing_method) "
+                    + "values (1, 'bad', 'Per Person')").update())
+                    .isInstanceOfSatisfying(org.springframework.dao.DataIntegrityViolationException.class,
+                            e -> assertThat(lk.serenetravels.masterdataservice.util.SqlErrors.sqlState(e)).isEqualTo("23514"));
+
+            // ---- writes against session-local shadows only
+            for (String table : realTables) {
+                jdbc.sql("create temp table " + table + " (like public." + table + " including all)").update();
+            }
+            int destinationId = jdbc.sql("select min(id) from public.destination").query(Integer.class).single();
+
+            AttractionResponse created = attractions.create(new java.util.LinkedHashMap<>(Map.of(
+                    "name", "Smoke Safari", "destinationId", destinationId, "pricingMethod", "PER_PERSON",
+                    "isSafari", true, "jeepCapacity", 6)));
+            assertThat(created.id()).isNotNull();
+            assertThatThrownBy(() -> attractions.create(new java.util.LinkedHashMap<>(Map.of(
+                    "name", "smoke safari", "destinationId", destinationId, "pricingMethod", "PER_PERSON"))))
+                    .isInstanceOfSatisfying(ConflictException.class, e -> assertThat(e.getCode()).isEqualTo("DUPLICATE"));
+
+            AttractionResponse grouped = attractions.update(created.id(), new java.util.LinkedHashMap<>(Map.of(
+                    "pricingMethod", "FIXED_GROUP_PLUS_EXTRA", "fixedGroupSize", 6)));
+            assertThat(grouped.pricingMethod()).isEqualTo("FIXED_GROUP_PLUS_EXTRA");
+
+            // Rates keyed by the real allowed rate types, on the shadowed attraction_rate.
+            rates.setRate("attraction", new RateWriteRequest(
+                    Map.of("attractionId", created.id(), "rateType", "FIXED_GROUP_BASE"), new BigDecimal("120"), null), "smoke-test");
+            assertThatThrownBy(() -> rates.setRate("attraction", new RateWriteRequest(
+                    Map.of("attractionId", created.id(), "rateType", "Full ticket"), new BigDecimal("35"), null), "smoke-test"))
+                    .isInstanceOfSatisfying(lk.serenetravels.masterdataservice.exception.InvalidRequestException.class,
+                            e -> assertThat(e.getFieldErrors()).containsKey("keys.rateType"));
+            assertThat(attractions.get(created.id(), null).currentRates()).hasSize(1);
+            assertThat(attractions.list("smoke", null, null, null, null, 0, 10).content().get(0).currentRates())
+                    .singleElement().satisfies(r -> assertThat(r.rateType()).isEqualTo("FIXED_GROUP_BASE"));
+
+            // Tuk-tuk option: created once (the real UNIQUE(attraction_id) is copied), then a fare in LKR.
+            int locationId = attractions.enableTukTuk(created.id()).locationId();
+            assertThat(attractions.enableTukTuk(created.id()).locationId()).isEqualTo(locationId);
+            rates.setRate("tuk-tuk", new RateWriteRequest(Map.of("tukTukLocationId", locationId), new BigDecimal("500"), null), "smoke-test");
+            assertThat(attractions.get(created.id(), null).tukTuk().currentFare().rate()).isEqualByComparingTo("500");
 
             // ---- the real tables are exactly as they were
             for (String table : realTables) {

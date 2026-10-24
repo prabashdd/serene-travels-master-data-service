@@ -96,6 +96,44 @@ create table property_dest_ref (
     destination_id integer not null references destination (id)
 );
 
+-- NOTE: the real attraction.pricing_method and attraction_rate.rate_type have CHECK constraints on a fixed list
+-- of values. They are left out here because H2 fails to evaluate string IN/OR checks from a second connection;
+-- the service validates the same lists itself, and LivePostgresSmokeTest exercises the real constraints.
+create table attraction (
+    id integer generated always as identity primary key,
+    destination_id integer not null references destination (id),
+    name varchar(255) not null,
+    pricing_method varchar(50) not null,
+    is_safari boolean default false not null,
+    jeep_capacity smallint,
+    fixed_group_size smallint
+);
+create table attraction_rate (
+    id integer generated always as identity primary key,
+    attraction_id integer not null references attraction (id),
+    rate_type varchar(50) not null,
+    rate numeric(10, 2) not null,
+    effective_from date not null,
+    effective_to date,
+    created_at timestamp with time zone default current_timestamp not null,
+    created_by varchar(255) not null,
+    check (effective_to is null or effective_to > effective_from)
+);
+create table tuk_tuk_location (
+    id integer generated always as identity primary key,
+    attraction_id integer not null unique references attraction (id)
+);
+create table tuk_tuk_fare_rate (
+    id integer generated always as identity primary key,
+    tuk_tuk_location_id integer not null references tuk_tuk_location (id),
+    fare numeric(10, 2) not null,
+    effective_from date not null,
+    effective_to date,
+    created_at timestamp with time zone default current_timestamp not null,
+    created_by varchar(255) not null,
+    check (effective_to is null or effective_to > effective_from)
+);
+
 create table property_rate (
     id integer generated always as identity primary key,
     property_id integer not null,
