@@ -5,6 +5,7 @@ import lk.serenetravels.masterdataservice.dto.AttractionSummaryResponse;
 import lk.serenetravels.masterdataservice.dto.BabyCotRequest;
 import lk.serenetravels.masterdataservice.dto.ChildRuleRequest;
 import lk.serenetravels.masterdataservice.dto.DietarySupportRequest;
+import lk.serenetravels.masterdataservice.dto.DriverResponse;
 import lk.serenetravels.masterdataservice.dto.PageResponse;
 import lk.serenetravels.masterdataservice.dto.PropertyInclusionRequest;
 import lk.serenetravels.masterdataservice.dto.PropertyResponse;
@@ -12,11 +13,14 @@ import lk.serenetravels.masterdataservice.dto.PropertySummaryResponse;
 import lk.serenetravels.masterdataservice.dto.RateRowResponse;
 import lk.serenetravels.masterdataservice.dto.RateWriteRequest;
 import lk.serenetravels.masterdataservice.dto.RoomTypeResponse;
+import lk.serenetravels.masterdataservice.dto.VehicleResponse;
 import lk.serenetravels.masterdataservice.exception.ConflictException;
 import lk.serenetravels.masterdataservice.service.impl.AttractionServiceImpl;
+import lk.serenetravels.masterdataservice.service.impl.DriverServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.LookupServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.PropertyServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.RateServiceImpl;
+import lk.serenetravels.masterdataservice.service.impl.VehicleServiceImpl;
 import lk.serenetravels.masterdataservice.util.RateFamilies;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
@@ -263,6 +267,84 @@ class LivePostgresSmokeTest {
             assertThat(attractions.enableTukTuk(created.id()).locationId()).isEqualTo(locationId);
             rates.setRate("tuk-tuk", new RateWriteRequest(Map.of("tukTukLocationId", locationId), new BigDecimal("500"), null), "smoke-test");
             assertThat(attractions.get(created.id(), null).tukTuk().currentFare().rate()).isEqualByComparingTo("500");
+
+            // ---- the real tables are exactly as they were
+            for (String table : realTables) {
+                assertThat(count(jdbc, "public." + table)).as(table).isEqualTo(before.get(table));
+            }
+        }
+    }
+
+    @Test
+    void fleetReadsRealDataAndWritesOnlyToSessionLocalCopies() throws Exception {
+        try (SingleConnectionDataSource dataSource = new SingleConnectionDataSource(URL, "postgres", "postgres", true)) {
+            JdbcClient jdbc = JdbcClient.create(dataSource);
+            Clock clock = Clock.system(ZoneId.of("Asia/Colombo"));
+            VehicleServiceImpl vehicles = new VehicleServiceImpl(jdbc, clock);
+            DriverServiceImpl drivers = new DriverServiceImpl(jdbc, clock);
+
+            List<String> realTables = List.of("vehicle", "driver");
+            Map<String, Long> before = new java.util.LinkedHashMap<>();
+            for (String table : realTables) {
+                before.put(table, count(jdbc, "public." + table));
+            }
+
+            // ---- reads against the real fleet
+            var fleet = vehicles.list(null, null, null, null, null, List.of("registrationNo,asc"), 0, 50);
+            assertThat(fleet.totalElements()).isEqualTo(before.get("vehicle"));
+            assertThat(fleet.content()).allSatisfy(v -> {
+                assertThat(v.vehicleType().name()).isNotBlank();
+                assertThat(v.driver()).isNotNull();
+            });
+            int expiredOrSoon = vehicles.list(null, null, null, true, 30, null, 0, 50).content().size();
+            assertThat(vehicles.list(null, null, null, null, 3650, null, 0, 50).content().size())
+                    .isGreaterThanOrEqualTo(expiredOrSoon);
+            assertThat(vehicles.list("lokuhetty", null, "CONTRACTED", true, null, List.of("type,asc", "insuranceExpiry,asc"), 0, 5)
+                    .content()).isNotEmpty();
+
+            var people = drivers.list(null, null, null, null, List.of("name,asc"), 0, 50);
+            assertThat(people.totalElements()).isEqualTo(before.get("driver"));
+            assertThat(people.content()).anySatisfy(p -> assertThat(p.vehicles()).isNotEmpty());
+            int someDriver = fleet.content().get(0).driver().id();
+            assertThat(drivers.get(someDriver).vehicles()).extracting(v -> v.name())
+                    .contains(fleet.content().get(0).registrationNo());
+
+            // ---- the real database refuses codes outside its lists
+            assertThatThrownBy(() -> jdbc.sql("insert into public.driver (name, nic, role) values ('x', 'zz-1', 'BOSS')").update())
+                    .isInstanceOfSatisfying(org.springframework.dao.DataIntegrityViolationException.class,
+                            e -> assertThat(lk.serenetravels.masterdataservice.util.SqlErrors.sqlState(e)).isEqualTo("23514"));
+
+            // ---- writes against session-local shadows only
+            for (String table : realTables) {
+                jdbc.sql("create temp table " + table + " (like public." + table + " including all)").update();
+            }
+            int typeId = jdbc.sql("select min(id) from public.vehicle_type").query(Integer.class).single();
+
+            DriverResponse driver = drivers.create(new java.util.LinkedHashMap<>(Map.of(
+                    "name", "Smoke Driver", "nic", "smoke-1", "gender", "male", "isChauffeur", true)));
+            DriverResponse assistant = drivers.create(new java.util.LinkedHashMap<>(Map.of(
+                    "name", "Smoke Assistant", "nic", "smoke-2", "role", "assistant")));
+            assertThatThrownBy(() -> drivers.create(new java.util.LinkedHashMap<>(Map.of("name", "Clash", "nic", " SMOKE-1 "))))
+                    .isInstanceOfSatisfying(ConflictException.class, e -> assertThat(e.getCode()).isEqualTo("DUPLICATE"));
+
+            VehicleResponse created = vehicles.create(new java.util.LinkedHashMap<>(Map.of(
+                    "registrationNo", "smoke-1", "vehicleTypeId", typeId, "seatingCapacity", 1, "method", "contracted",
+                    "driverId", driver.id(), "assistantId", assistant.id(),
+                    "insuranceExpiryDate", "2020-01-01")));
+            assertThat(created.registrationNo()).isEqualTo("SMOKE-1");
+            assertThat(created.warnings()).extracting(w -> w.code()).containsExactly("INSURANCE_EXPIRED");
+            assertThatThrownBy(() -> vehicles.create(new java.util.LinkedHashMap<>(Map.of(
+                    "registrationNo", "SMOKE-1", "vehicleTypeId", typeId, "seatingCapacity", 1, "method", "INTERNAL"))))
+                    .isInstanceOfSatisfying(ConflictException.class, e -> assertThat(e.getCode()).isEqualTo("DUPLICATE"));
+
+            assertThat(vehicles.update(created.id(), new java.util.LinkedHashMap<>(Map.of(
+                    "insuranceExpiryDate", LocalDate.now(clock).plusYears(1).toString()))).warnings()).isEmpty();
+            assertThatThrownBy(() -> drivers.update(driver.id(), new java.util.LinkedHashMap<>(Map.of("role", "ASSISTANT", "isChauffeur", false))))
+                    .isInstanceOfSatisfying(ConflictException.class, e -> assertThat(e.getCode()).isEqualTo("IN_USE"));
+            drivers.deactivate(driver.id());
+            assertThat(vehicles.get(created.id()).warnings()).extracting(w -> w.code()).containsExactly("DRIVER_INACTIVE");
+            vehicles.deactivate(created.id());
+            assertThat(vehicles.get(created.id()).warnings()).isEmpty();
 
             // ---- the real tables are exactly as they were
             for (String table : realTables) {

@@ -45,6 +45,41 @@ create table technical_visit_category (
     active boolean default true not null
 );
 
+-- NOTE: the real vehicle.method and driver.role have CHECK constraints (INTERNAL/CONTRACTED, DRIVER/ASSISTANT).
+-- They are left out here for the same H2 reason as above; the service validates the same lists itself.
+create table driver (
+    id integer generated always as identity primary key,
+    name varchar(255) not null,
+    contact varchar(255),
+    license_no varchar(255),
+    active boolean default true not null,
+    title varchar(50),
+    name_with_initials varchar(255),
+    shortname varchar(255),
+    gender varchar(20),
+    nic varchar(50) not null unique,
+    date_of_birth date,
+    address varchar(1000),
+    mobile_2 varchar(255),
+    role varchar(20) default 'DRIVER' not null,
+    is_chauffeur boolean default false not null
+);
+create table vehicle (
+    id integer generated always as identity primary key,
+    registration_no varchar(50) not null unique,
+    vehicle_type_id integer not null references vehicle_type (id),
+    seating_capacity smallint not null,
+    method varchar(20) not null,
+    owner_name varchar(255),
+    insurance_company varchar(255),
+    policy_number varchar(255),
+    insurance_expiry_date date,
+    revenue_license_expiry_date date,
+    driver_id integer references driver (id),
+    assistant_id integer references driver (id),
+    active boolean default true not null
+);
+
 create table property (
     id integer generated always as identity primary key,
     destination_id integer not null references destination (id),

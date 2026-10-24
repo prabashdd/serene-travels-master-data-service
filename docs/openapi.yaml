@@ -701,7 +701,8 @@ paths:
         - $ref: '#/components/parameters/Q'
         - $ref: '#/components/parameters/Active'
         - { name: vehicleTypeId, in: query, schema: { type: integer } }
-        - { name: expiringWithinDays, in: query, description: 'Insurance or revenue licence expires within N days', schema: { type: integer, minimum: 0 } }
+        - { name: method, in: query, schema: { $ref: '#/components/schemas/VehicleMethod' } }
+        - { name: expiringWithinDays, in: query, description: 'Insurance or revenue licence expires within N days (already-expired ones are included)', schema: { type: integer, minimum: 0, maximum: 3650 } }
       responses:
         '200':
           description: Page of vehicles
@@ -774,7 +775,8 @@ paths:
         - $ref: '#/components/parameters/Sort'
         - $ref: '#/components/parameters/Q'
         - $ref: '#/components/parameters/Active'
-        - { name: isChauffeur, in: query, schema: { type: boolean } }
+        - { name: role, in: query, schema: { $ref: '#/components/schemas/DriverRole' } }
+        - { name: chauffeur, in: query, schema: { type: boolean } }
       responses:
         '200':
           description: Page of drivers
@@ -1841,7 +1843,7 @@ components:
         registrationNo: { type: string }
         vehicleType: { $ref: '#/components/schemas/Ref' }
         seatingCapacity: { type: integer }
-        method: { type: string, description: 'Free text today (e.g. OWNED / HIRED); agree a closed enum' }
+        method: { $ref: '#/components/schemas/VehicleMethod' }
         ownerName: { type: string, nullable: true }
         insuranceCompany: { type: string, nullable: true }
         policyNumber: { type: string, nullable: true }
@@ -1861,16 +1863,22 @@ components:
           items:
             type: object
             properties:
-              code: { type: string, enum: [INSURANCE_EXPIRING, INSURANCE_EXPIRED, LICENSE_EXPIRING, LICENSE_EXPIRED, NO_DRIVER] }
-              daysLeft: { type: integer, nullable: true }
-        version: { type: integer }
+              code: { type: string, enum: [INSURANCE_EXPIRING, INSURANCE_EXPIRED, LICENSE_EXPIRING, LICENSE_EXPIRED, NO_DRIVER, DRIVER_INACTIVE, ASSISTANT_INACTIVE] }
+              daysLeft: { type: integer, nullable: true, description: 'Signed days until expiry; negative = expired that many days ago' }
+    VehicleMethod:
+      type: string
+      enum: [INTERNAL, CONTRACTED]
+    DriverRole:
+      type: string
+      enum: [DRIVER, ASSISTANT]
     VehicleInput:
       type: object
+      description: 'Required on create: registrationNo (unique, stored upper-case), vehicleTypeId, seatingCapacity (at most what the type carries), method. driverId must be an active DRIVER, assistantId an active ASSISTANT. Send null on PATCH to clear an optional field.'
       properties:
         registrationNo: { type: string }
         vehicleTypeId: { type: integer }
-        seatingCapacity: { type: integer }
-        method: { type: string }
+        seatingCapacity: { type: integer, minimum: 1, maximum: 100 }
+        method: { $ref: '#/components/schemas/VehicleMethod' }
         ownerName: { type: string }
         insuranceCompany: { type: string }
         policyNumber: { type: string }
@@ -1879,7 +1887,6 @@ components:
         driverId: { type: integer, nullable: true }
         assistantId: { type: integer, nullable: true }
         active: { type: boolean }
-        version: { type: integer }
     VehiclePage:
       allOf:
         - $ref: '#/components/schemas/PageMeta'
@@ -1896,35 +1903,38 @@ components:
         name: { type: string }
         nameWithInitials: { type: string, nullable: true }
         shortname: { type: string, nullable: true }
-        gender: { type: string, nullable: true }
+        gender: { type: string, enum: [MALE, FEMALE, OTHER], nullable: true }
         nic: { type: string }
         dateOfBirth: { type: string, format: date, nullable: true }
         address: { type: string, nullable: true }
         contact: { type: string, nullable: true }
         mobile2: { type: string, nullable: true }
         licenseNo: { type: string, nullable: true }
-        role: { type: string, description: 'Free text today; agree a closed enum' }
+        role: { $ref: '#/components/schemas/DriverRole' }
         isChauffeur: { type: boolean }
         active: { type: boolean }
-        version: { type: integer }
+        vehicles:
+          type: array
+          description: 'Vehicles this person is assigned to (as driver or assistant); name is the registration number'
+          items: { $ref: '#/components/schemas/Ref' }
     DriverInput:
       type: object
+      description: 'Required on create: name, nic (unique). role defaults to DRIVER; isChauffeur only applies to a DRIVER. Send null on PATCH to clear an optional field.'
       properties:
         title: { type: string }
         name: { type: string }
         nameWithInitials: { type: string }
         shortname: { type: string }
-        gender: { type: string }
+        gender: { type: string, enum: [MALE, FEMALE, OTHER] }
         nic: { type: string }
         dateOfBirth: { type: string, format: date }
         address: { type: string }
         contact: { type: string }
         mobile2: { type: string }
         licenseNo: { type: string }
-        role: { type: string }
+        role: { $ref: '#/components/schemas/DriverRole' }
         isChauffeur: { type: boolean }
         active: { type: boolean }
-        version: { type: integer }
     DriverPage:
       allOf:
         - $ref: '#/components/schemas/PageMeta'
