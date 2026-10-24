@@ -848,8 +848,8 @@ paths:
         - $ref: '#/components/parameters/Sort'
         - $ref: '#/components/parameters/Q'
         - $ref: '#/components/parameters/Active'
-        - { name: guideType, in: query, schema: { type: string } }
-        - { name: languageId, in: query, schema: { type: integer } }
+        - { name: guideType, in: query, schema: { $ref: '#/components/schemas/GuideType' } }
+        - { name: languageId, in: query, description: 'Only guides who speak this language', schema: { type: integer } }
       responses:
         '200':
           description: Page of guides
@@ -917,6 +917,7 @@ paths:
       tags: [Guides]
       operationId: replaceGuideLanguages
       summary: Replace the languages a guide speaks
+      description: Send the complete list of language ids (use [] to clear it). Unknown or repeated ids are reported against the offending item, e.g. languageIds[1].
       requestBody:
         required: true
         content:
@@ -1950,7 +1951,7 @@ components:
         guideNo: { type: string }
         name: { type: string }
         nickname: { type: string, nullable: true }
-        guideType: { type: string, description: 'Free text today; agree a closed enum' }
+        guideType: { $ref: '#/components/schemas/GuideType' }
         nic: { type: string, nullable: true }
         contact: { type: string, nullable: true }
         email: { type: string, nullable: true }
@@ -1958,21 +1959,27 @@ components:
         town: { type: string, nullable: true }
         languages: { type: array, items: { $ref: '#/components/schemas/Ref' } }
         active: { type: boolean }
-        version: { type: integer }
+    GuideType:
+      type: string
+      enum: [DRIVER, CHAUFFEUR_GUIDE, NATIONAL_GUIDE]
     GuideInput:
       type: object
+      description: 'Required on create: guideNo (unique, stored upper-case), name, guideType. nic is optional but unique. On create, languageIds (a list of language ids) sets the languages in the same call; to change them later use PUT /guides/{id}/languages. Send null on PATCH to clear an optional field.'
       properties:
         guideNo: { type: string }
         name: { type: string }
         nickname: { type: string }
-        guideType: { type: string }
+        guideType: { $ref: '#/components/schemas/GuideType' }
         nic: { type: string }
         contact: { type: string }
-        email: { type: string }
+        email: { type: string, format: email }
         address: { type: string }
         town: { type: string }
         active: { type: boolean }
-        version: { type: integer }
+        languageIds:
+          type: array
+          description: 'Create only'
+          items: { type: integer }
     GuidePage:
       allOf:
         - $ref: '#/components/schemas/PageMeta'

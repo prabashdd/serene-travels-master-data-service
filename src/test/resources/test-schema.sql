@@ -80,6 +80,27 @@ create table vehicle (
     active boolean default true not null
 );
 
+-- NOTE: the real guide.guide_type has a CHECK (DRIVER / CHAUFFEUR_GUIDE / NATIONAL_GUIDE), left out here for the
+-- same H2 reason as above; the service validates the same list itself.
+create table guide (
+    id integer generated always as identity primary key,
+    name varchar(255) not null,
+    guide_type varchar(30) not null,
+    contact varchar(255),
+    active boolean default true not null,
+    guide_no varchar(50) not null unique,
+    nickname varchar(255),
+    nic varchar(50) unique,
+    address varchar(1000),
+    town varchar(255),
+    email varchar(255)
+);
+create table guide_language (
+    guide_id integer not null references guide (id),
+    language_id integer not null references language (id),
+    primary key (guide_id, language_id)
+);
+
 create table property (
     id integer generated always as identity primary key,
     destination_id integer not null references destination (id),

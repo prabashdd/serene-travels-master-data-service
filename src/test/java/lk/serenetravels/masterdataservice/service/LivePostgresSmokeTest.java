@@ -6,6 +6,7 @@ import lk.serenetravels.masterdataservice.dto.BabyCotRequest;
 import lk.serenetravels.masterdataservice.dto.ChildRuleRequest;
 import lk.serenetravels.masterdataservice.dto.DietarySupportRequest;
 import lk.serenetravels.masterdataservice.dto.DriverResponse;
+import lk.serenetravels.masterdataservice.dto.GuideResponse;
 import lk.serenetravels.masterdataservice.dto.PageResponse;
 import lk.serenetravels.masterdataservice.dto.PropertyInclusionRequest;
 import lk.serenetravels.masterdataservice.dto.PropertyResponse;
@@ -17,6 +18,7 @@ import lk.serenetravels.masterdataservice.dto.VehicleResponse;
 import lk.serenetravels.masterdataservice.exception.ConflictException;
 import lk.serenetravels.masterdataservice.service.impl.AttractionServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.DriverServiceImpl;
+import lk.serenetravels.masterdataservice.service.impl.GuideServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.LookupServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.PropertyServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.RateServiceImpl;
@@ -345,6 +347,68 @@ class LivePostgresSmokeTest {
             assertThat(vehicles.get(created.id()).warnings()).extracting(w -> w.code()).containsExactly("DRIVER_INACTIVE");
             vehicles.deactivate(created.id());
             assertThat(vehicles.get(created.id()).warnings()).isEmpty();
+
+            // ---- the real tables are exactly as they were
+            for (String table : realTables) {
+                assertThat(count(jdbc, "public." + table)).as(table).isEqualTo(before.get(table));
+            }
+        }
+    }
+
+    @Test
+    void guidesReadRealDataAndWriteOnlyToSessionLocalCopies() throws Exception {
+        try (SingleConnectionDataSource dataSource = new SingleConnectionDataSource(URL, "postgres", "postgres", true)) {
+            JdbcClient jdbc = JdbcClient.create(dataSource);
+            GuideServiceImpl guides = new GuideServiceImpl(jdbc);
+
+            List<String> realTables = List.of("guide", "guide_language");
+            Map<String, Long> before = new java.util.LinkedHashMap<>();
+            for (String table : realTables) {
+                before.put(table, count(jdbc, "public." + table));
+            }
+
+            // ---- reads against the real roster
+            var page = guides.list(null, null, null, null, List.of("guideNo,asc"), 0, 200);
+            assertThat(page.totalElements()).isEqualTo(before.get("guide"));
+            assertThat(page.content()).hasSize(200);
+            assertThat(page.content()).anySatisfy(g -> assertThat(g.languages()).isNotEmpty());
+
+            int english = jdbc.sql("select id from public.language where name = 'English'").query(Integer.class).single();
+            var englishSpeakers = guides.list(null, null, english, true, List.of("name,asc"), 0, 50);
+            assertThat(englishSpeakers.totalElements()).isGreaterThan(1000);
+            assertThat(englishSpeakers.content()).allSatisfy(g ->
+                    assertThat(g.languages()).extracting(l -> l.name()).contains("English"));
+            assertThat(guides.list("athula", "NATIONAL_GUIDE", null, null, null, 0, 10).content()).isNotEmpty();
+            int someId = page.content().get(0).id();
+            assertThat(guides.get(someId).guideNo()).isEqualTo(page.content().get(0).guideNo());
+
+            // ---- the real database refuses a guide type outside its list
+            assertThatThrownBy(() -> jdbc.sql("insert into public.guide (name, guide_type, guide_no) values ('x', 'ASTRONAUT', 'zz-1')").update())
+                    .isInstanceOfSatisfying(org.springframework.dao.DataIntegrityViolationException.class,
+                            e -> assertThat(lk.serenetravels.masterdataservice.util.SqlErrors.sqlState(e)).isEqualTo("23514"));
+
+            // ---- writes against session-local shadows only
+            for (String table : realTables) {
+                jdbc.sql("create temp table " + table + " (like public." + table + " including all)").update();
+            }
+            int german = jdbc.sql("select id from public.language where name = 'German'").query(Integer.class).single();
+
+            GuideResponse created = guides.create(new java.util.LinkedHashMap<>(Map.of(
+                    "guideNo", "smoke-1", "name", "Smoke Guide", "guideType", "chauffeur_guide", "nic", "smoke-nic",
+                    "languageIds", List.of(english, german))));
+            assertThat(created.guideNo()).isEqualTo("SMOKE-1");
+            assertThat(created.languages()).extracting(l -> l.name()).containsExactly("English", "German");
+            assertThatThrownBy(() -> guides.create(new java.util.LinkedHashMap<>(Map.of(
+                    "guideNo", " Smoke-1 ", "name", "Clash", "guideType", "NATIONAL_GUIDE"))))
+                    .isInstanceOfSatisfying(ConflictException.class, e -> assertThat(e.getCode()).isEqualTo("DUPLICATE"));
+            assertThatThrownBy(() -> guides.create(new java.util.LinkedHashMap<>(Map.of(
+                    "guideNo", "smoke-2", "name", "Clash", "guideType", "NATIONAL_GUIDE", "nic", " SMOKE-NIC "))))
+                    .isInstanceOfSatisfying(ConflictException.class, e -> assertThat(e.getCode()).isEqualTo("DUPLICATE"));
+
+            assertThat(guides.replaceLanguages(created.id(), List.of(german))).extracting(l -> l.name()).containsExactly("German");
+            assertThat(guides.update(created.id(), new java.util.LinkedHashMap<>(Map.of("town", "Kandy"))).town()).isEqualTo("Kandy");
+            guides.deactivate(created.id());
+            assertThat(guides.get(created.id()).active()).isFalse();
 
             // ---- the real tables are exactly as they were
             for (String table : realTables) {

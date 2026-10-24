@@ -130,7 +130,7 @@ Paths are relative to `/api/v1/master-data`. Every endpoint, read or write, requ
 | **packages** | `GET`/`POST /packages` | `GET`/`PATCH`/`DELETE` | `PUT /packages/{id}/sites` |
 | **vehicles** | `GET`/`POST /vehicles` (`q`, `vehicleTypeId`, `method`, `active`, `expiringWithinDays`) | `GET`/`PATCH`/`DELETE /vehicles/{id}` | — (the driver and assistant are plain fields: `driverId`, `assistantId`) |
 | **drivers** | `GET`/`POST /drivers` (`q` over name / NIC / phone / licence, `role`, `active`, `chauffeur`) | `GET`/`PATCH`/`DELETE /drivers/{id}` | each person lists the vehicles they are assigned to |
-| **guides** | `GET`/`POST /guides` (`q`, `guideType`, `languageId`) | `GET`/`PATCH`/`DELETE` | `PUT /guides/{id}/languages` |
+| **guides** | `GET`/`POST /guides` (`q` over name / nickname / guide no / NIC / phone / email / town, `guideType`, `languageId`, `active`) | `GET`/`PATCH`/`DELETE /guides/{id}` | `PUT /guides/{id}/languages` replaces the set of language ids; `POST` also accepts `languageIds` to set them in the same call |
 | **promotions** | `GET`/`POST /promotions` (`active`, `validOn`) | `GET`/`PATCH`/`DELETE` | value via family `promotion` |
 | **location-distances** | `GET`/`POST` (`fromDestinationId`, `toDestinationId`) | `GET`/`PATCH`/`DELETE` | — |
 | **info-articles** | `GET`/`POST` (`category`, `destinationId`) | `GET`/`PATCH`/`DELETE` | — |
@@ -258,7 +258,8 @@ Master data is an **internal back-office service**. Roles are the ones user-serv
 | Hotels: list / search / sort, one-hotel aggregate (`include=rates`), create, quick edit, soft delete, room types, child rules, inclusions, dietary support, baby cot | ✅ built |
 | Attractions: list / search / sort with current prices, one-attraction aggregate, create, quick edit, delete, tuk-tuk option | ✅ built |
 | Vehicles and drivers: list / search / sort, create, quick edit, soft delete, expiry and driver warnings, role rules | ✅ built |
-| Aggregates: restaurants, packages, guides, promotions, distances, articles | ⏳ not built |
+| Guides: list / search / sort / filter by language, create (optionally with languages), quick edit, soft delete, replace languages | ✅ built |
+| Aggregates: restaurants, packages, promotions, distances, articles | ⏳ not built |
 | Alerts, import / export | ⏳ not built |
 | Rate list `sort` | Not supported on `GET /rates/{family}`: rows are always newest-first (`effective_from desc`) |
 | Promotion value unit | USD until `promotion.type` has agreed values (a percentage promotion would be PERCENT) |
@@ -269,12 +270,13 @@ Tests: unit and HTTP tests run on in-memory H2 (PostgreSQL mode). `LivePostgresS
 
 **Resolved**
 
+- Guides: `guideNo` is unique and stored upper-case; `nic` is optional but unique when present (case- and spacing-insensitive); a guide's languages come from the `languages` lookup and are replaced as a whole set. Not enforced yet: any link between a guide's `guideType` and the prefix of its `guideNo` (`N-` / `C-` ...), since the data does not state a rule.
 - Fleet rules: a vehicle's `driverId` must be an active person whose role is DRIVER and its `assistantId` an active ASSISTANT; seats may not exceed what the vehicle type carries; registration numbers and NICs are unique (case- and spacing-insensitive); a person cannot change role while assigned to a vehicle in the other slot (409 IN_USE). An active vehicle's `warnings` flag insurance / revenue licence that has expired or expires within 30 days, no driver, and an inactive driver or assistant; the `expiringWithinDays` filter finds vehicles to chase (already-expired ones included). Deactivating a driver does not block - the vehicle just shows `DRIVER_INACTIVE` until reassigned.
 - Attraction list rows carry a compact `currentRates` (`rateType`, `rate`, `unit`) so a table can show prices without a second call; the single-attraction response carries the full rate rows. `FIXED_GROUP_PLUS_EXTRA` attractions must have a `fixedGroupSize`; `PER_PERSON` ones must not. An attraction name is unique within its destination.
 - Currency: `misc` and `package` are USD; `tuk-tuk` is LKR (with vehicle and transport per-km). Tax is PERCENT. **Guide accommodation is LKR** (the supplied data says "LKR 4500") - the rate family in the code still says USD and needs correcting.
 - Rate intervals are half-open `[from, to)`, matching the existing `CHECK (effective_to > effective_from)`. Note that existing seasons use inclusive end dates, so no one should hand-enter `effective_to` as an inclusive last day.
 - `restaurant_closed_day.day_of_week` is ISO (1 = Monday … 7 = Sunday).
-- `attraction.pricing_method` (`PER_PERSON` / `FIXED_GROUP_PLUS_EXTRA`) and `attraction_rate.rate_type` (seven values, see §5.1) are closed lists enforced by the database; the API validates them and publishes them (the rate families endpoint lists the allowed rate types). `vehicle.method` (`INTERNAL` / `CONTRACTED`) and `driver.role` (`DRIVER` / `ASSISTANT`) are closed lists enforced by the database and validated by the API; `guide.guide_type` stays a free-text string in v1. Introduce closed enums later, once the full value sets are known.
+- `attraction.pricing_method` (`PER_PERSON` / `FIXED_GROUP_PLUS_EXTRA`) and `attraction_rate.rate_type` (seven values, see §5.1) are closed lists enforced by the database; the API validates them and publishes them (the rate families endpoint lists the allowed rate types). `vehicle.method` (`INTERNAL` / `CONTRACTED`), `driver.role` (`DRIVER` / `ASSISTANT`) and `guide.guide_type` (`DRIVER` / `CHAUFFEUR_GUIDE` / `NATIONAL_GUIDE`) are closed lists enforced by the database and validated by the API. Introduce closed enums later, once the full value sets are known.
 - Rate corrections via `PATCH` rely on `created_by` only in v1. A `rate_audit` table (§5.2) is a recommended follow-up, not part of v1.
 
 - AGENT has no access to this service; agents see prices only through quotations (D4). `technical_visit_category` is soft-deleted (D5).
