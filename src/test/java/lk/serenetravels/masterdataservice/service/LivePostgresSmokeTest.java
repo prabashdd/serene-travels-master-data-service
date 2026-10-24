@@ -7,6 +7,7 @@ import lk.serenetravels.masterdataservice.dto.ChildRuleRequest;
 import lk.serenetravels.masterdataservice.dto.DietarySupportRequest;
 import lk.serenetravels.masterdataservice.dto.DriverResponse;
 import lk.serenetravels.masterdataservice.dto.GuideResponse;
+import lk.serenetravels.masterdataservice.dto.PackageResponse;
 import lk.serenetravels.masterdataservice.dto.PageResponse;
 import lk.serenetravels.masterdataservice.dto.PropertyInclusionRequest;
 import lk.serenetravels.masterdataservice.dto.PropertyResponse;
@@ -21,6 +22,7 @@ import lk.serenetravels.masterdataservice.service.impl.AttractionServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.DriverServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.GuideServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.LookupServiceImpl;
+import lk.serenetravels.masterdataservice.service.impl.PackageServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.PropertyServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.RateServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.RestaurantServiceImpl;
@@ -478,6 +480,61 @@ class LivePostgresSmokeTest {
             assertThat(count(jdbc, "restaurant")).isZero();
             assertThat(count(jdbc, "restaurant_closed_day")).isZero();
             assertThat(count(jdbc, "restaurant_dietary_capability")).isZero();
+
+            // ---- the real tables are exactly as they were
+            for (String table : realTables) {
+                assertThat(count(jdbc, "public." + table)).as(table).isEqualTo(before.get(table));
+            }
+        }
+    }
+
+    @Test
+    void packagesPriceThroughTheRealPartialIndexAndWriteOnlyToSessionLocalCopies() throws Exception {
+        try (SingleConnectionDataSource dataSource = new SingleConnectionDataSource(URL, "postgres", "postgres", true)) {
+            JdbcClient jdbc = JdbcClient.create(dataSource);
+            Clock clock = Clock.system(ZoneId.of("Asia/Colombo"));
+            RateServiceImpl rates = new RateServiceImpl(jdbc, clock);
+            PackageServiceImpl packages = new PackageServiceImpl(jdbc, clock);
+
+            List<String> realTables = List.of("site_tour_package", "site_tour_package_site", "site_tour_package_rate");
+            Map<String, Long> before = new java.util.LinkedHashMap<>();
+            for (String table : realTables) {
+                before.put(table, count(jdbc, "public." + table));
+            }
+
+            // ---- reads work against the real (currently empty) tables
+            assertThat(packages.list(null, null, null, List.of("name,asc"), 0, 20).totalElements()).isEqualTo(before.get("site_tour_package"));
+
+            // ---- writes against session-local shadows only. The shadows keep the real UNIQUE(name) and the real
+            // "one open price per package" partial index, but not the foreign keys, so the sites below are real attractions.
+            for (String table : realTables) {
+                jdbc.sql("create temp table " + table + " (like public." + table + " including all)").update();
+            }
+            List<Integer> attractionIds = jdbc.sql("select id from public.attraction order by id limit 3").query(Integer.class).list();
+            assertThat(attractionIds).hasSize(3);
+
+            PackageResponse created = packages.create(new java.util.LinkedHashMap<>(Map.of(
+                    "name", "Smoke Triangle", "attractionIds", attractionIds)));
+            assertThat(created.sites()).hasSize(3);
+            assertThatThrownBy(() -> packages.create(new java.util.LinkedHashMap<>(Map.of("name", "smoke triangle"))))
+                    .isInstanceOfSatisfying(ConflictException.class, e -> assertThat(e.getCode()).isEqualTo("DUPLICATE"));
+
+            // The price is a USD rate on the real table's shape: set, revised (closing the first), read back.
+            rates.setRate("package", new RateWriteRequest(Map.of("packageId", created.id()), new BigDecimal("150"), null), "smoke-test");
+            assertThat(packages.get(created.id(), null).currentRate().rate()).isEqualByComparingTo("150");
+            rates.setRate("package", new RateWriteRequest(Map.of("packageId", created.id()), new BigDecimal("165"),
+                    LocalDate.now(clock).plusDays(30)), "smoke-test");
+            assertThat(packages.get(created.id(), null).currentRate().rate()).isEqualByComparingTo("150");
+            assertThat(packages.get(created.id(), LocalDate.now(clock).plusDays(30)).currentRate().rate()).isEqualByComparingTo("165");
+            assertThat(packages.list("smoke", attractionIds.get(0), null, null, 0, 10).content()).singleElement()
+                    .satisfies(p -> assertThat(p.currentRate().rate()).isEqualByComparingTo("150"));
+
+            assertThat(packages.replaceSites(created.id(), List.of(attractionIds.get(1)))).hasSize(1);
+            assertThatThrownBy(() -> packages.delete(created.id()))
+                    .isInstanceOfSatisfying(ConflictException.class, e -> assertThat(e.getCode()).isEqualTo("IN_USE"));
+            PackageResponse spare = packages.create(new java.util.LinkedHashMap<>(Map.of("name", "Smoke Spare")));
+            packages.delete(spare.id());
+            assertThat(count(jdbc, "site_tour_package")).isEqualTo(1);
 
             // ---- the real tables are exactly as they were
             for (String table : realTables) {

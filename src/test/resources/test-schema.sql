@@ -207,6 +207,26 @@ create table tuk_tuk_fare_rate (
     check (effective_to is null or effective_to > effective_from)
 );
 
+create table site_tour_package (
+    id integer generated always as identity primary key,
+    name varchar(255) not null unique
+);
+create table site_tour_package_site (
+    package_id integer not null references site_tour_package (id),
+    attraction_id integer not null references attraction (id),
+    primary key (package_id, attraction_id)
+);
+create table site_tour_package_rate (
+    id integer generated always as identity primary key,
+    package_id integer not null references site_tour_package (id),
+    rate numeric(10, 2) not null,
+    effective_from date not null,
+    effective_to date,
+    created_at timestamp with time zone default current_timestamp not null,
+    created_by varchar(255) not null,
+    check (effective_to is null or effective_to > effective_from)
+);
+
 create table property_rate (
     id integer generated always as identity primary key,
     property_id integer not null,

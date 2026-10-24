@@ -605,6 +605,7 @@ paths:
         - $ref: '#/components/parameters/Size'
         - $ref: '#/components/parameters/Sort'
         - $ref: '#/components/parameters/Q'
+        - { name: attractionId, in: query, description: 'Only packages that include this attraction', schema: { type: integer } }
         - $ref: '#/components/parameters/At'
       responses:
         '200':
@@ -647,7 +648,8 @@ paths:
     patch:
       tags: [Packages]
       operationId: updatePackage
-      summary: Quick edit
+      summary: Quick edit (rename)
+      description: Send name. The included sites have their own call and the price is a rate (PUT /rates/package).
       requestBody:
         required: true
         content:
@@ -664,6 +666,7 @@ paths:
       tags: [Packages]
       operationId: deletePackage
       summary: Delete
+      description: Removes the package and its site links. Refused with 409 IN_USE once the package has any price history, which is never deleted.
       responses:
         '204': { description: Deleted }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -675,6 +678,7 @@ paths:
       tags: [Packages]
       operationId: replacePackageSites
       summary: Replace the attractions included in the package
+      description: Send the complete list of attraction ids (use [] to clear it). Unknown or repeated ids are reported against the offending item, e.g. attractionIds[1]. Returned by name.
       requestBody:
         required: true
         content:
@@ -1842,8 +1846,13 @@ components:
           nullable: true
     PackageInput:
       type: object
+      description: 'Required on create: name (unique, case-insensitive). On create only, attractionIds sets the included sites in the same call; afterwards use PUT /packages/{id}/sites.'
       properties:
         name: { type: string }
+        attractionIds:
+          type: array
+          description: Create only
+          items: { type: integer }
     PackagePage:
       allOf:
         - $ref: '#/components/schemas/PageMeta'

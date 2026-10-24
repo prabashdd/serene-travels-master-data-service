@@ -127,7 +127,7 @@ Paths are relative to `/api/v1/master-data`. Every endpoint, read or write, requ
 | **properties** | `GET`/`POST /properties` (`q`, `destinationId`, `active`, `starRating`) | `GET`/`PATCH`/`DELETE /properties/{id}` (`include=rates`) | `POST /properties/{id}/room-types`; `PATCH`/`DELETE /room-types/{id}`; `PUT /properties/{id}/child-rules`; `PUT /properties/{id}/inclusions`; `PUT /properties/{id}/dietary`; `PUT /properties/{id}/baby-cot`; `PUT /properties/{id}/rates` (grid) |
 | **attractions** | `GET`/`POST /attractions` (`q`, `destinationId`, `safari`, `pricingMethod`) | `GET`/`PATCH`/`DELETE /attractions/{id}` | `PUT`/`DELETE /attractions/{id}/tuk-tuk` give the attraction a tuk-tuk option (returns the `locationId` the fare is keyed by); the fare itself is a `tuk-tuk` rate |
 | **restaurants** | `GET`/`POST /restaurants` (`q`, `destinationId`, `dietaryCategoryId`, `closedOn`, `openOn`) | `GET`/`PATCH`/`DELETE /restaurants/{id}` | `PUT /restaurants/{id}/closed-days` (day names) and `PUT /restaurants/{id}/dietary` (category ids) replace the sets; `POST` also accepts `closedDays` and `dietaryCategoryIds` |
-| **packages** | `GET`/`POST /packages` | `GET`/`PATCH`/`DELETE` | `PUT /packages/{id}/sites` |
+| **packages** | `GET`/`POST /packages` (`q`, `attractionId`, `at`) | `GET`/`PATCH`/`DELETE /packages/{id}` | `PUT /packages/{id}/sites` (attraction ids) replaces the set; `POST` also accepts `attractionIds`. The price is a rate: `PUT /rates/package` |
 | **vehicles** | `GET`/`POST /vehicles` (`q`, `vehicleTypeId`, `method`, `active`, `expiringWithinDays`) | `GET`/`PATCH`/`DELETE /vehicles/{id}` | — (the driver and assistant are plain fields: `driverId`, `assistantId`) |
 | **drivers** | `GET`/`POST /drivers` (`q` over name / NIC / phone / licence, `role`, `active`, `chauffeur`) | `GET`/`PATCH`/`DELETE /drivers/{id}` | each person lists the vehicles they are assigned to |
 | **guides** | `GET`/`POST /guides` (`q` over name / nickname / guide no / NIC / phone / email / town, `guideType`, `languageId`, `active`) | `GET`/`PATCH`/`DELETE /guides/{id}` | `PUT /guides/{id}/languages` replaces the set of language ids; `POST` also accepts `languageIds` to set them in the same call |
@@ -260,7 +260,8 @@ Master data is an **internal back-office service**. Roles are the ones user-serv
 | Vehicles and drivers: list / search / sort, create, quick edit, soft delete, expiry and driver warnings, role rules | ✅ built |
 | Guides: list / search / sort / filter by language, create (optionally with languages), quick edit, soft delete, replace languages | ✅ built |
 | Restaurants: list / search / filter (dietary, closed or open on a day), create (optionally with days and dietary), rename / move, delete, replace closed days and dietary support | ✅ built |
-| Aggregates: packages, promotions, distances, articles | ⏳ not built |
+| Packages: list / search / filter by included site, create (optionally with sites), rename, delete, replace sites; current price shown (priced via `/rates/package`) | ✅ built |
+| Aggregates: promotions, distances, articles | ⏳ not built |
 | Alerts, import / export | ⏳ not built |
 | Rate list `sort` | Not supported on `GET /rates/{family}`: rows are always newest-first (`effective_from desc`) |
 | Promotion value unit | USD until `promotion.type` has agreed values (a percentage promotion would be PERCENT) |
