@@ -1610,7 +1610,6 @@ components:
           nullable: true
           description: Only present with include=rates
           items: { $ref: '#/components/schemas/RateRow' }
-        version: { type: integer }
     PropertyInput:
       type: object
       required: [code, name, destinationId]
@@ -1627,10 +1626,7 @@ components:
     PropertyPatch:
       allOf:
         - type: object
-          properties:
-            version: { type: integer, description: Optional optimistic-lock token }
-        - type: object
-          description: Any subset of PropertyInput fields
+          description: Any subset of PropertyInput fields. Send null to clear an optional field.
           properties:
             code: { type: string }
             name: { type: string }

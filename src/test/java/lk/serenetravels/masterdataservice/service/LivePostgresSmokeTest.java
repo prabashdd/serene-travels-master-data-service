@@ -1,10 +1,18 @@
 package lk.serenetravels.masterdataservice.service;
 
+import lk.serenetravels.masterdataservice.dto.BabyCotRequest;
+import lk.serenetravels.masterdataservice.dto.ChildRuleRequest;
+import lk.serenetravels.masterdataservice.dto.DietarySupportRequest;
 import lk.serenetravels.masterdataservice.dto.PageResponse;
+import lk.serenetravels.masterdataservice.dto.PropertyInclusionRequest;
+import lk.serenetravels.masterdataservice.dto.PropertyResponse;
+import lk.serenetravels.masterdataservice.dto.PropertySummaryResponse;
 import lk.serenetravels.masterdataservice.dto.RateRowResponse;
 import lk.serenetravels.masterdataservice.dto.RateWriteRequest;
+import lk.serenetravels.masterdataservice.dto.RoomTypeResponse;
 import lk.serenetravels.masterdataservice.exception.ConflictException;
 import lk.serenetravels.masterdataservice.service.impl.LookupServiceImpl;
+import lk.serenetravels.masterdataservice.service.impl.PropertyServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.RateServiceImpl;
 import lk.serenetravels.masterdataservice.util.RateFamilies;
 import org.junit.jupiter.api.Test;
@@ -95,6 +103,93 @@ class LivePostgresSmokeTest {
             // ---- the real tables are exactly as they were
             assertThat(count(jdbc, "public.vehicle_rate")).isEqualTo(realVehicleRates);
             assertThat(count(jdbc, "public.property_rate")).isEqualTo(realPropertyRates);
+        }
+    }
+
+    @Test
+    void hotelsReadRealDataAndWriteOnlyToSessionLocalCopies() throws Exception {
+        try (SingleConnectionDataSource dataSource = new SingleConnectionDataSource(URL, "postgres", "postgres", true)) {
+            JdbcClient jdbc = JdbcClient.create(dataSource);
+            Clock clock = Clock.system(ZoneId.of("Asia/Colombo"));
+            RateServiceImpl rates = new RateServiceImpl(jdbc, clock);
+            PropertyServiceImpl hotels = new PropertyServiceImpl(jdbc, clock, rates);
+
+            List<String> realTables = List.of("property", "room_type", "property_child_rule", "property_inclusion",
+                    "baby_cot_option", "property_dietary_capability");
+            Map<String, Long> before = new java.util.LinkedHashMap<>();
+            for (String table : realTables) {
+                before.put(table, count(jdbc, "public." + table));
+            }
+
+            // ---- reads against the real hotels
+            PageResponse<PropertySummaryResponse> page = hotels.list(null, null, null, null, null, 0, 5);
+            assertThat(page.totalElements()).isEqualTo(before.get("property"));
+            assertThat(page.content()).hasSize(5);
+            assertThat(hotels.list("amaya", null, null, null, List.of("name,asc"), 0, 50).content())
+                    .isNotEmpty().allSatisfy(h -> assertThat(h.name().toLowerCase()).contains("amaya"));
+            assertThat(hotels.list(null, null, null, 4, List.of("starRating,desc", "name,asc"), 0, 5).content())
+                    .allSatisfy(h -> assertThat(h.starRating()).isEqualTo(4));
+
+            int richest = jdbc.sql("select property_id from room_type group by property_id order by count(*) desc, property_id limit 1")
+                    .query(Integer.class).single();
+            PropertyResponse detail = hotels.get(richest, false, null);
+            assertThat(detail.roomTypes()).isNotEmpty();
+            assertThat(detail.destination().name()).isNotBlank();
+
+            // The imported rates are all historical (2018-2024), so look at one as of a date it was in force.
+            Map<String, Object> legacy = jdbc.sql("select property_id, effective_from from property_rate order by id limit 1")
+                    .query((rs, n) -> Map.<String, Object>of("property", rs.getInt(1),
+                            "from", rs.getObject(2, LocalDate.class))).single();
+            int priced = (int) legacy.get("property");
+            assertThat(hotels.get(priced, true, (LocalDate) legacy.get("from")).rates()).isNotEmpty()
+                    .allSatisfy(r -> assertThat(r.keys()).containsEntry("propertyId", priced));
+            assertThat(hotels.get(priced, true, null).rates()).isEmpty();      // nothing is in force today
+            assertThat(hotels.list(null, null, null, null, null, 0, 200).content()).hasSize(200)
+                    .allSatisfy(h -> assertThat(h.fromRate()).isNull());       // so no hotel has a "from" rate yet
+
+            // ---- writes against session-local shadows only
+            for (String table : realTables) {
+                jdbc.sql("create temp table " + table + " (like public." + table + " including all)").update();
+            }
+            int destinationId = jdbc.sql("select min(id) from public.destination").query(Integer.class).single();
+
+            PropertyResponse created = hotels.create(new java.util.LinkedHashMap<>(Map.of(
+                    "code", "SMOKE-1", "name", "Smoke Test Lodge", "destinationId", destinationId, "starRating", 4)));
+            assertThat(created.id()).isNotNull();
+            assertThatThrownBy(() -> hotels.create(new java.util.LinkedHashMap<>(Map.of(
+                    "code", "SMOKE-1", "name", "Clash", "destinationId", destinationId))))
+                    .isInstanceOfSatisfying(ConflictException.class, e -> assertThat(e.getCode()).isEqualTo("DUPLICATE"));
+
+            RoomTypeResponse room = hotels.addRoomType(created.id(), new java.util.LinkedHashMap<>(Map.of(
+                    "name", "Deluxe", "baseCapacity", 2)));
+            assertThat(hotels.updateRoomType(room.id(), new java.util.LinkedHashMap<>(Map.of("extraBedAllowed", true)))
+                    .extraBedAllowed()).isTrue();
+
+            assertThat(hotels.replaceChildRules(created.id(), List.of(
+                    new ChildRuleRequest(0, 5, false, BigDecimal.ZERO),
+                    new ChildRuleRequest(6, 11, true, new BigDecimal("25"))))).hasSize(2);
+            int inclusionId = jdbc.sql("select min(id) from public.hotel_inclusion").query(Integer.class).single();
+            assertThat(hotels.replaceInclusions(created.id(), List.of(new PropertyInclusionRequest(inclusionId, null)))).hasSize(1);
+            int categoryId = jdbc.sql("select min(id) from public.dietary_category").query(Integer.class).single();
+            assertThat(hotels.replaceDietary(created.id(), List.of(new DietarySupportRequest(categoryId, true)))).hasSize(1);
+            hotels.setBabyCot(created.id(), new BabyCotRequest(true, new BigDecimal("12")));
+            hotels.setBabyCot(created.id(), new BabyCotRequest(false, null));   // second call takes the update path
+
+            PropertyResponse full = hotels.get(created.id(), false, null);
+            assertThat(full.roomTypes()).hasSize(1);
+            assertThat(full.childRules()).hasSize(2);
+            assertThat(full.inclusions()).hasSize(1);
+            assertThat(full.dietary()).hasSize(1);
+            assertThat(full.babyCot().available()).isFalse();
+
+            hotels.deactivate(created.id());
+            assertThat(hotels.get(created.id(), false, null).active()).isFalse();
+            hotels.deleteRoomType(room.id());
+
+            // ---- the real tables are exactly as they were
+            for (String table : realTables) {
+                assertThat(count(jdbc, "public." + table)).as(table).isEqualTo(before.get(table));
+            }
         }
     }
 

@@ -48,7 +48,8 @@ class RateServiceTest {
                 ('Standard', '2026-01-01', '2026-12-31')""").update();
         jdbc.sql("insert into vehicle_type (name, min_capacity, max_capacity) values ('Car', 1, 2), ('Van', 3, 5)")
                 .update();
-        jdbc.sql("insert into property (name) values ('Cinnamon Lodge')").update();
+        jdbc.sql("insert into destination (name, country) values ('Habarana', 'Sri Lanka')").update();
+        jdbc.sql("insert into property (destination_id, name, code) values (1, 'Cinnamon Lodge', 'CIN')").update();
         jdbc.sql("insert into room_type (property_id, name) values (1, 'Deluxe')").update();
         jdbc.sql("insert into nationality (name, iso_code) values ('India', 'IN'), ('Japan', 'JP')").update();
         jdbc.sql("insert into tax_rate (name) values ('VAT')").update();

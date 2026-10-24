@@ -4,7 +4,7 @@ import lk.serenetravels.masterdataservice.exception.ConflictException;
 import lk.serenetravels.masterdataservice.exception.InvalidRequestException;
 import lk.serenetravels.masterdataservice.exception.NotFoundException;
 import lk.serenetravels.masterdataservice.service.LookupService;
-import lk.serenetravels.masterdataservice.util.Coerce;
+import lk.serenetravels.masterdataservice.util.ColumnValues;
 import lk.serenetravels.masterdataservice.util.LookupDefinitions;
 import lk.serenetravels.masterdataservice.util.LookupDefinitions.Column;
 import lk.serenetravels.masterdataservice.util.LookupDefinitions.Lookup;
@@ -153,45 +153,8 @@ public class LookupServiceImpl implements LookupService {
         };
     }
 
-    // Unknown fields are rejected (a typo should not silently do nothing); on create every required
-    // field must be present, and on update a required field can be changed but never blanked.
     private Map<String, Object> coerce(Lookup lookup, Map<String, Object> body, boolean creating) {
-        Map<String, String> errors = new LinkedHashMap<>();
-        Map<String, Object> values = new LinkedHashMap<>();
-
-        for (String field : body.keySet()) {
-            if (lookup.column(field) == null) {
-                errors.put(field, "is not a field of " + lookup.name());
-            }
-        }
-
-        for (Column column : lookup.columns()) {
-            Object raw = body.get(column.json());
-            boolean blank = raw == null || (raw instanceof String text && text.isBlank());
-            if (blank) {
-                if (column.required() && (creating || body.containsKey(column.json()))) {
-                    errors.put(column.json(), "is required");
-                } else if (!column.required() && body.containsKey(column.json())) {
-                    values.put(column.json(), null);
-                }
-                continue;
-            }
-            try {
-                values.put(column.json(), switch (column.type()) {
-                    case TEXT -> Coerce.toText(raw, column.json());
-                    case INT -> Coerce.toInt(raw, column.json());
-                    case DATE -> Coerce.toDate(raw, column.json());
-                    case BOOL -> Coerce.toBool(raw, column.json());
-                });
-            } catch (InvalidRequestException ex) {
-                errors.putAll(ex.getFieldErrors());
-            }
-        }
-
-        if (!errors.isEmpty()) {
-            throw new InvalidRequestException("Validation failed", errors);
-        }
-        return values;
+        return ColumnValues.coerce(lookup.name(), lookup.columns(), body, creating);
     }
 
     private NotFoundException notFound(Lookup lookup, int id) {

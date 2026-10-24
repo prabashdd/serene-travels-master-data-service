@@ -98,6 +98,20 @@ public class RateServiceImpl implements RateService {
     }
 
     @Override
+    public List<RateRowResponse> listCurrent(String familyName, Map<String, String> filter, LocalDate at) {
+        Family family = RateFamilies.require(familyName);
+        LocalDate on = at != null ? at : today();
+
+        Map<String, Object> params = new HashMap<>();
+        List<String> conditions = new ArrayList<>(keyConditions(family, parseFilter(family, filter), params));
+        conditions.add(currentCondition(params, on));
+        List<RawRate> rows = jdbc.sql("select " + selectColumns(family) + " from " + family.table()
+                        + " where " + String.join(" and ", conditions) + " order by id")
+                .params(params).query(rowMapper(family)).list();
+        return toResponses(family, rows, on);
+    }
+
+    @Override
     public ResolvedRateResponse resolve(String familyName, Map<String, String> rawKeys, LocalDate at) {
         Family family = RateFamilies.require(familyName);
         LocalDate on = at != null ? at : today();

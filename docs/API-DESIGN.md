@@ -45,7 +45,7 @@ Standalone: every lookup, `location-distances`, `info-articles`.
 - **Expansion:** `GET /{id}?include=rates,roomTypes` for optional heavy parts (documented per resource).
 - **Writes:** `POST` → `201` + body + `Location`. `PATCH` → `200` + updated body (send only changed fields). `PUT` on collections replaces the whole collection. `DELETE` → `204`.
 - **Delete semantics:** property, vehicle, driver, guide, promotion and technical visit category are **soft-deleted** (`active=false`). Everything else is a hard delete, refused with `409 IN_USE` if still referenced.
-- **Optimistic locking:** mutable aggregates carry `version`. Send it back on `PATCH`/`PUT` to opt in; a mismatch is `409 VERSION_CONFLICT`. Omit it for fire-and-forget quick edits. Rate rows are append-only and need no version.
+- **Optimistic locking:** mutable aggregates carry `version`. Send it back on `PATCH`/`PUT` to opt in; a mismatch is `409 VERSION_CONFLICT`. Omit it for fire-and-forget quick edits. Rate rows are append-only and need no version. **Not implemented yet:** the existing tables have no `version` column, and adding one is a schema change, so hotel edits are last-write-wins for now.
 - **Audit:** `createdBy` always comes from the JWT (`preferred_username`), never from the request body.
 - **Money:** JSON numbers with at most 2 decimal places, because every rate column is `numeric(10,2)` (tax percentage is `numeric(5,2)`, max 100). Negative values and anything over the column maximum are rejected with a field error. `unit` states what the number is.
 - **Dates:** ISO-8601 `YYYY-MM-DD`; timestamps in UTC.
@@ -163,8 +163,7 @@ Paths are relative to `/api/v1/master-data`. Every endpoint, read or write, requ
   "inclusions": [{ "inclusion": { "id": 3, "name": "Breakfast" }, "cost": null }],
   "babyCot": { "available": true, "cost": 10.00 },
   "dietary": [{ "category": { "id": 2, "name": "Vegan" }, "supported": true }],
-  "rates": null,
-  "version": 4
+  "rates": null
 }
 ```
 `rates` is `null` unless `?include=rates`, then an array of `RateRow`.
@@ -256,7 +255,8 @@ Master data is an **internal back-office service**. Roles are the ones user-serv
 | Foundation: security (Keycloak realm roles, ADMIN/MANAGER only), problem+json errors, springdoc, Consul registration, CORS | ✅ built |
 | Lookups: bundle (ETag), per-lookup list / create / edit / delete, soft delete for technical visit categories | ✅ built |
 | Rate engine: families, list, set (close-and-open, vehicle fan-out), correct, delete pending, adjust (dry run), resolve, property grid save | ✅ built |
-| Aggregates: properties, attractions, restaurants, packages, vehicles, drivers, guides, promotions, distances, articles | ⏳ not built |
+| Hotels: list / search / sort, one-hotel aggregate (`include=rates`), create, quick edit, soft delete, room types, child rules, inclusions, dietary support, baby cot | ✅ built |
+| Aggregates: attractions, restaurants, packages, vehicles, drivers, guides, promotions, distances, articles | ⏳ not built |
 | Alerts, import / export | ⏳ not built |
 | Rate list `sort` | Not supported on `GET /rates/{family}`: rows are always newest-first (`effective_from desc`) |
 | Promotion value unit | USD until `promotion.type` has agreed values (a percentage promotion would be PERCENT) |
@@ -267,7 +267,7 @@ Tests: unit and HTTP tests run on in-memory H2 (PostgreSQL mode). `LivePostgresS
 
 **Resolved**
 
-- Currency: `misc`, `package`, `guide-accommodation` are USD; `tuk-tuk` is LKR (with vehicle and transport per-km). Tax is PERCENT.
+- Currency: `misc` and `package` are USD; `tuk-tuk` is LKR (with vehicle and transport per-km). Tax is PERCENT. **Guide accommodation is LKR** (the supplied data says "LKR 4500") - the rate family in the code still says USD and needs correcting.
 - Rate intervals are half-open `[from, to)`, matching the existing `CHECK (effective_to > effective_from)`. Note that existing seasons use inclusive end dates, so no one should hand-enter `effective_to` as an inclusive last day.
 - `restaurant_closed_day.day_of_week` is ISO (1 = Monday … 7 = Sunday).
 - `attraction.pricing_method`, `attraction_rate.rate_type`, `vehicle.method`, `guide.guide_type`, `driver.role` stay free-text strings in v1; the OpenAPI types them as `string`. Introduce closed enums later, once the full value sets are known.
@@ -277,4 +277,5 @@ Tests: unit and HTTP tests run on in-memory H2 (PostgreSQL mode). `LivePostgresS
 
 **Still open**
 
-1. **Service-account role name and flow** for `GET /rates/resolve`. `QUOTATION_SERVICE` via Keycloak client-credentials is proposed in §9; it needs a Keycloak client and role created when the quotation service is built.
+1. **Legacy rate end dates are inclusive.** All 3,074 hotel rates in the database are `legacy_import` rows from 2018-2024 whose `effective_to` is the last valid day (e.g. 2019-10-31, with the next rate starting 2019-11-01). The rate engine treats `effective_to` as exclusive, so a legacy rate appears to end one day early. Decide one convention and either adjust the engine or convert the legacy rows. Also note that every one of those rates has expired (the latest ended 2024-10-31), so no hotel has a current rate and the hotel list's `fromRate` is empty until current rates are entered.
+2. **Service-account role name and flow** for `GET /rates/resolve`. `QUOTATION_SERVICE` via Keycloak client-credentials is proposed in §9; it needs a Keycloak client and role created when the quotation service is built.

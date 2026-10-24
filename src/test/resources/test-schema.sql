@@ -45,11 +45,50 @@ create table technical_visit_category (
     active boolean default true not null
 );
 
-create table property (id integer generated always as identity primary key, name varchar(255) not null);
+create table property (
+    id integer generated always as identity primary key,
+    destination_id integer not null references destination (id),
+    name varchar(255) not null,
+    address varchar(1000),
+    star_rating smallint check (star_rating >= 1 and star_rating <= 5),
+    active boolean default true not null,
+    code varchar(100) not null unique,
+    website varchar(255),
+    email varchar(255),
+    phone varchar(255)
+);
 create table room_type (
     id integer generated always as identity primary key,
     property_id integer not null references property (id),
-    name varchar(255) not null
+    name varchar(255) not null,
+    base_capacity smallint,
+    extra_bed_allowed boolean default false not null
+);
+create table property_child_rule (
+    id integer generated always as identity primary key,
+    property_id integer not null references property (id),
+    min_age smallint not null,
+    max_age smallint not null,
+    requires_bed boolean not null,
+    cost numeric default 0 not null,
+    check (max_age >= min_age)
+);
+create table property_inclusion (
+    property_id integer not null references property (id),
+    inclusion_id integer not null references hotel_inclusion (id),
+    cost numeric,
+    primary key (property_id, inclusion_id)
+);
+create table baby_cot_option (
+    property_id integer primary key references property (id),
+    available boolean default false not null,
+    cost numeric
+);
+create table property_dietary_capability (
+    property_id integer not null references property (id),
+    dietary_category_id integer not null references dietary_category (id),
+    supported boolean not null,
+    primary key (property_id, dietary_category_id)
 );
 -- Referenced by a lookup in the "still in use" test.
 create table property_dest_ref (
@@ -60,7 +99,7 @@ create table property_dest_ref (
 create table property_rate (
     id integer generated always as identity primary key,
     property_id integer not null,
-    room_type_id integer not null,
+    room_type_id integer not null references room_type (id),
     season_id integer not null,
     nationality_id integer,
     rate numeric(10, 2) not null,

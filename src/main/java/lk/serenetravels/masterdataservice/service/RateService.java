@@ -21,6 +21,10 @@ public interface RateService {
     PageResponse<RateRowResponse> list(String family, Map<String, String> filter, LocalDate at, boolean history,
                                        int page, int size);
 
+    // Every rate in force on `at` (default today) for the given key subset, unpaged - for building a
+    // complete view such as a hotel's rate grid.
+    List<RateRowResponse> listCurrent(String family, Map<String, String> filter, LocalDate at);
+
     // Closes the open row for these keys (if any) and opens a new one. For the vehicle family an
     // omitted seasonId applies to every season in one transaction.
     List<RateRowResponse> setRate(String family, RateWriteRequest request, String createdBy);
