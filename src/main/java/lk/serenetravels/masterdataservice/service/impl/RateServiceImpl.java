@@ -116,6 +116,29 @@ public class RateServiceImpl implements RateService {
     }
 
     @Override
+    public List<RateRowResponse> endingWithoutSuccessor(String familyName, LocalDate from, LocalDate to) {
+        Family family = RateFamilies.require(familyName);
+        // "Same keys" for the successor test; an "applies to all" key matches NULL to NULL. Identifiers come from the registry.
+        String sameKeys = family.keys().stream()
+                .map(k -> k.nullMeansAll()
+                        ? "(u." + k.column() + " = t." + k.column() + " or (u." + k.column() + " is null and t."
+                        + k.column() + " is null))"
+                        : "u." + k.column() + " = t." + k.column())
+                .collect(Collectors.joining(" and "));
+        if (sameKeys.isEmpty()) {
+            sameKeys = "1 = 1";
+        }
+        List<Integer> ids = jdbc.sql("select t.id from " + family.table() + " t"
+                        + " where t.effective_from <= :today and t.effective_to is not null"
+                        + " and t.effective_to > :today and t.effective_to >= :from and t.effective_to <= :to"
+                        + " and not exists (select 1 from " + family.table() + " u where u.id <> t.id and " + sameKeys
+                        + " and u.effective_from >= t.effective_to)"
+                        + " order by t.effective_to, t.id")
+                .param("today", today()).param("from", from).param("to", to).query(Integer.class).list();
+        return findByIds(family, ids, today());
+    }
+
+    @Override
     public ResolvedRateResponse resolve(String familyName, Map<String, String> rawKeys, LocalDate at) {
         Family family = RateFamilies.require(familyName);
         LocalDate on = at != null ? at : today();

@@ -298,6 +298,28 @@ create table vehicle_rate (
     created_by varchar(255) not null,
     check (effective_to is null or effective_to > effective_from)
 );
+create table guide_accommodation_rate (
+    id integer generated always as identity primary key,
+    season_id integer not null,
+    destination_id integer,
+    rate numeric(10, 2) not null,
+    effective_from date not null,
+    effective_to date,
+    created_at timestamp with time zone default current_timestamp not null,
+    created_by varchar(255) not null,
+    check (effective_to is null or effective_to > effective_from)
+);
+create table misc_cost_rate (
+    id integer generated always as identity primary key,
+    misc_cost_type_id integer not null,
+    nationality_id integer,
+    rate numeric(10, 2) not null,
+    effective_from date not null,
+    effective_to date,
+    created_at timestamp with time zone default current_timestamp not null,
+    created_by varchar(255) not null,
+    check (effective_to is null or effective_to > effective_from)
+);
 create table transport_rate_config (
     id integer generated always as identity primary key,
     per_km_rate numeric(10, 2) not null,

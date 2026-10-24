@@ -1349,17 +1349,37 @@ paths:
     get:
       tags: [Operations]
       operationId: listAlerts
-      summary: Things needing attention (expiries, vehicles without drivers, rates ending soon, properties with no current rate)
+      summary: Things needing attention, most urgent first
+      description: 'Worked out from the current data on every call; nothing is stored. Severity: CRITICAL = a date already past; WARNING = a date within 7 days, a missing driver or a missing rate; INFO = a date further ahead but inside withinDays. Already-expired documents always count whatever withinDays is.'
       parameters:
-        - { name: withinDays, in: query, schema: { type: integer, minimum: 1, default: 30 } }
+        - { name: withinDays, in: query, description: 'How far ahead a coming expiry counts', schema: { type: integer, minimum: 0, maximum: 3650, default: 30 } }
+        - { name: code, in: query, schema: { $ref: '#/components/schemas/AlertCode' } }
+        - { name: severity, in: query, schema: { $ref: '#/components/schemas/AlertSeverity' } }
+        - $ref: '#/components/parameters/Page'
+        - { name: size, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
       responses:
         '200':
-          description: Alerts, most urgent first
+          description: Page of alerts, most urgent first
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/Alert' }
+              schema: { $ref: '#/components/schemas/AlertPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /alerts/summary:
+    get:
+      tags: [Operations]
+      operationId: alertSummary
+      summary: Alert counts by severity and by code
+      description: For a dashboard badge. Every severity and every code is present, with 0 when there are none.
+      parameters:
+        - { name: withinDays, in: query, schema: { type: integer, minimum: 0, maximum: 3650, default: 30 } }
+      responses:
+        '200':
+          description: Counts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AlertSummary' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
   /import/{table}/template:
     parameters:
@@ -2306,18 +2326,37 @@ components:
         unit: { $ref: '#/components/schemas/RateUnit' }
 
     # ------------------------------------------------------------ operations
+    AlertCode:
+      type: string
+      description: Any letter case is accepted in a filter.
+      enum: [VEHICLE_INSURANCE_EXPIRING, VEHICLE_LICENSE_EXPIRING, VEHICLE_NO_DRIVER, VEHICLE_DRIVER_INACTIVE, VEHICLE_ASSISTANT_INACTIVE, RATE_ENDING_SOON, PROPERTY_NO_CURRENT_RATE, ATTRACTION_NO_CURRENT_RATE]
+    AlertSeverity:
+      type: string
+      enum: [CRITICAL, WARNING, INFO]
     Alert:
       type: object
       properties:
-        code:
-          type: string
-          enum: [VEHICLE_INSURANCE_EXPIRING, VEHICLE_LICENSE_EXPIRING, VEHICLE_NO_DRIVER, RATE_ENDING_SOON, PROPERTY_NO_CURRENT_RATE]
-        severity: { type: string, enum: [INFO, WARNING, CRITICAL] }
+        code: { $ref: '#/components/schemas/AlertCode' }
+        severity: { $ref: '#/components/schemas/AlertSeverity' }
         subject: { $ref: '#/components/schemas/Ref' }
-        subjectType: { type: string, example: vehicle }
+        subjectType: { type: string, description: 'vehicle, property, attraction or rate:<family>', example: vehicle }
         dueDate: { type: string, format: date, nullable: true }
-        daysLeft: { type: integer, nullable: true }
+        daysLeft: { type: integer, nullable: true, description: 'Negative = that many days ago' }
         message: { type: string }
+    AlertPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            content:
+              type: array
+              items: { $ref: '#/components/schemas/Alert' }
+    AlertSummary:
+      type: object
+      properties:
+        total: { type: integer }
+        bySeverity: { type: object, additionalProperties: { type: integer }, description: 'CRITICAL, WARNING, INFO' }
+        byCode: { type: object, additionalProperties: { type: integer }, description: 'Every alert code, 0 when none' }
     ImportResult:
       type: object
       properties:

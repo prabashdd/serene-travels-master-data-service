@@ -2,6 +2,7 @@ package lk.serenetravels.masterdataservice.service;
 
 import lk.serenetravels.masterdataservice.dto.AttractionResponse;
 import lk.serenetravels.masterdataservice.dto.AttractionSummaryResponse;
+import lk.serenetravels.masterdataservice.dto.AlertSummaryResponse;
 import lk.serenetravels.masterdataservice.dto.BabyCotRequest;
 import lk.serenetravels.masterdataservice.dto.ChildRuleRequest;
 import lk.serenetravels.masterdataservice.dto.DietarySupportRequest;
@@ -22,6 +23,7 @@ import lk.serenetravels.masterdataservice.dto.RestaurantResponse;
 import lk.serenetravels.masterdataservice.dto.RoomTypeResponse;
 import lk.serenetravels.masterdataservice.dto.VehicleResponse;
 import lk.serenetravels.masterdataservice.exception.ConflictException;
+import lk.serenetravels.masterdataservice.service.impl.AlertServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.AttractionServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.DriverServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.GuideServiceImpl;
@@ -717,6 +719,52 @@ class LivePostgresSmokeTest {
 
             // ---- the real table is exactly as it was
             assertThat(count(jdbc, "public.info_article")).isEqualTo(before);
+        }
+    }
+
+    @Test
+    void alertsRunAgainstTheRealSchemaAndMatchTheDataTheyDescribe() throws Exception {
+        try (SingleConnectionDataSource dataSource = new SingleConnectionDataSource(URL, "postgres", "postgres", true)) {
+            JdbcClient jdbc = JdbcClient.create(dataSource);
+            Clock clock = Clock.system(ZoneId.of("Asia/Colombo"));
+            RateServiceImpl rates = new RateServiceImpl(jdbc, clock);
+            AlertServiceImpl alerts = new AlertServiceImpl(jdbc, clock, rates);
+            LocalDate today = LocalDate.now(clock);
+
+            // Every query runs on the real tables (all ten rate families included) and agrees with a direct count.
+            AlertSummaryResponse summary = alerts.summary(null);
+            assertThat(summary.byCode()).hasSize(8);
+            assertThat(summary.total()).isEqualTo(summary.byCode().values().stream().mapToInt(Integer::intValue).sum())
+                    .isEqualTo(summary.bySeverity().values().stream().mapToInt(Integer::intValue).sum());
+
+            long propertiesWithoutRate = jdbc.sql("""
+                    select count(*) from public.property p where p.active and not exists (
+                      select 1 from public.property_rate r where r.property_id = p.id and r.effective_from <= :today
+                       and (r.effective_to is null or r.effective_to > :today))""").param("today", today).query(Long.class).single();
+            assertThat(summary.byCode().get("PROPERTY_NO_CURRENT_RATE")).isEqualTo((int) propertiesWithoutRate);
+
+            long attractionsWithoutRate = jdbc.sql("""
+                    select count(*) from public.attraction a where not exists (
+                      select 1 from public.attraction_rate r where r.attraction_id = a.id and r.effective_from <= :today
+                       and (r.effective_to is null or r.effective_to > :today))""").param("today", today).query(Long.class).single();
+            assertThat(summary.byCode().get("ATTRACTION_NO_CURRENT_RATE")).isEqualTo((int) attractionsWithoutRate);
+
+            long expiredDocuments = jdbc.sql("""
+                    select (select count(*) from public.vehicle where active and insurance_expiry_date < :today)
+                         + (select count(*) from public.vehicle where active and revenue_license_expiry_date < :today)""")
+                    .param("today", today).query(Long.class).single();
+            assertThat(alerts.list(null, null, "CRITICAL", 0, 200).totalElements()).isEqualTo(expiredDocuments);
+
+            // The rate-ending query is valid SQL for every family on the real schema (partial indexes, nullable keys).
+            for (var family : rates.families()) {
+                assertThat(rates.endingWithoutSuccessor(family.name(), today, today.plusDays(3650))).isNotNull();
+            }
+
+            // The most urgent alert is first, and a page past the end is simply empty.
+            var first = alerts.list(null, null, null, 0, 5);
+            assertThat(first.content()).isNotEmpty();
+            assertThat(first.content().get(0).severity()).isEqualTo(summary.bySeverity().get("CRITICAL") > 0 ? "CRITICAL" : "WARNING");
+            assertThat(alerts.list(null, null, null, 100000, 200).content()).isEmpty();
         }
     }
 

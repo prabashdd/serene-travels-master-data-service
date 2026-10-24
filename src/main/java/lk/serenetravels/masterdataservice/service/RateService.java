@@ -25,6 +25,10 @@ public interface RateService {
     // complete view such as a hotel's rate grid.
     List<RateRowResponse> listCurrent(String family, Map<String, String> filter, LocalDate at);
 
+    // Rates still in force today that end within [from, to] and are not followed by another rate for the same keys -
+    // i.e. the price will run out. A rate whose successor is already lined up is not reported.
+    List<RateRowResponse> endingWithoutSuccessor(String family, LocalDate from, LocalDate to);
+
     // Closes the open row for these keys (if any) and opens a new one. For the vehicle family an
     // omitted seasonId applies to every season in one transaction.
     List<RateRowResponse> setRate(String family, RateWriteRequest request, String createdBy);
