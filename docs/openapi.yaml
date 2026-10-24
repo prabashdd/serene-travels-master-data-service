@@ -483,6 +483,9 @@ paths:
         - $ref: '#/components/parameters/Sort'
         - $ref: '#/components/parameters/Q'
         - $ref: '#/components/parameters/DestinationId'
+        - { name: dietaryCategoryId, in: query, description: 'Only restaurants that cater for this dietary need', schema: { type: integer } }
+        - { name: closedOn, in: query, description: 'Only restaurants closed on this day', schema: { $ref: '#/components/schemas/DayOfWeek' } }
+        - { name: openOn, in: query, description: 'Only restaurants NOT closed on this day', schema: { $ref: '#/components/schemas/DayOfWeek' } }
       responses:
         '200':
           description: Page of restaurants
@@ -549,22 +552,23 @@ paths:
     put:
       tags: [Restaurants]
       operationId: replaceRestaurantClosedDays
-      summary: Replace closed days (ISO weekday 1=Mon..7=Sun)
+      summary: Replace the days the restaurant is closed
+      description: Send the complete list of day names (use [] if it is open every day). Unknown or repeated days are reported against the offending item, e.g. days[1].
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: array
-              items: { type: integer, minimum: 1, maximum: 7 }
+              items: { $ref: '#/components/schemas/DayOfWeek' }
       responses:
         '200':
-          description: New set
+          description: New set, in week order (Monday first)
           content:
             application/json:
               schema:
                 type: array
-                items: { type: integer }
+                items: { type: string, enum: [MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY] }
         '404': { $ref: '#/components/responses/NotFound' }
   /restaurants/{id}/dietary:
     parameters:
@@ -1795,14 +1799,27 @@ components:
         destination: { $ref: '#/components/schemas/Ref' }
         closedDays:
           type: array
-          description: ISO weekday numbers, 1=Monday .. 7=Sunday
-          items: { type: integer, minimum: 1, maximum: 7 }
+          description: Day names in week order (Monday first). Stored by the database as 0=Sunday..6=Saturday; the API hides that.
+          items: { type: string, enum: [MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY] }
         dietary: { type: array, items: { $ref: '#/components/schemas/Ref' } }
+    DayOfWeek:
+      type: string
+      description: A full English day name; any letter case is accepted and it is normalised to upper case.
+      enum: [MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY]
     RestaurantInput:
       type: object
+      description: 'Required on create: name (unique within its destination), destinationId. On create only, closedDays (day names) and dietaryCategoryIds set both sets in the same call; afterwards use the PUT calls.'
       properties:
         name: { type: string }
         destinationId: { type: integer }
+        closedDays:
+          type: array
+          description: Create only
+          items: { $ref: '#/components/schemas/DayOfWeek' }
+        dietaryCategoryIds:
+          type: array
+          description: Create only
+          items: { type: integer }
     RestaurantPage:
       allOf:
         - $ref: '#/components/schemas/PageMeta'

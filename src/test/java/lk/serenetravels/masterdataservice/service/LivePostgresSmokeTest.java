@@ -13,6 +13,7 @@ import lk.serenetravels.masterdataservice.dto.PropertyResponse;
 import lk.serenetravels.masterdataservice.dto.PropertySummaryResponse;
 import lk.serenetravels.masterdataservice.dto.RateRowResponse;
 import lk.serenetravels.masterdataservice.dto.RateWriteRequest;
+import lk.serenetravels.masterdataservice.dto.RestaurantResponse;
 import lk.serenetravels.masterdataservice.dto.RoomTypeResponse;
 import lk.serenetravels.masterdataservice.dto.VehicleResponse;
 import lk.serenetravels.masterdataservice.exception.ConflictException;
@@ -22,6 +23,7 @@ import lk.serenetravels.masterdataservice.service.impl.GuideServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.LookupServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.PropertyServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.RateServiceImpl;
+import lk.serenetravels.masterdataservice.service.impl.RestaurantServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.VehicleServiceImpl;
 import lk.serenetravels.masterdataservice.util.RateFamilies;
 import org.junit.jupiter.api.Test;
@@ -409,6 +411,73 @@ class LivePostgresSmokeTest {
             assertThat(guides.update(created.id(), new java.util.LinkedHashMap<>(Map.of("town", "Kandy"))).town()).isEqualTo("Kandy");
             guides.deactivate(created.id());
             assertThat(guides.get(created.id()).active()).isFalse();
+
+            // ---- the real tables are exactly as they were
+            for (String table : realTables) {
+                assertThat(count(jdbc, "public." + table)).as(table).isEqualTo(before.get(table));
+            }
+        }
+    }
+
+    @Test
+    void restaurantsFollowTheRealDayConventionAndWriteOnlyToSessionLocalCopies() throws Exception {
+        try (SingleConnectionDataSource dataSource = new SingleConnectionDataSource(URL, "postgres", "postgres", true)) {
+            JdbcClient jdbc = JdbcClient.create(dataSource);
+            RestaurantServiceImpl restaurants = new RestaurantServiceImpl(jdbc);
+
+            List<String> realTables = List.of("restaurant", "restaurant_closed_day", "restaurant_dietary_capability");
+            Map<String, Long> before = new java.util.LinkedHashMap<>();
+            for (String table : realTables) {
+                before.put(table, count(jdbc, "public." + table));
+            }
+
+            // ---- the database documents the numbering we map to: 0 = Sunday .. 6 = Saturday
+            String comment = jdbc.sql("""
+                            select d.description from pg_description d join pg_class c on c.oid = d.objoid
+                              join pg_attribute a on a.attrelid = c.oid and a.attnum = d.objsubid
+                             where c.relname = 'restaurant_closed_day' and a.attname = 'day_of_week'""")
+                    .query(String.class).single();
+            assertThat(comment).contains("0 = Sunday").contains("6 = Saturday");
+            for (int badDay : new int[]{-1, 7}) {
+                assertThatThrownBy(() -> jdbc.sql("insert into public.restaurant_closed_day (restaurant_id, day_of_week) values (1, :d)")
+                        .param("d", badDay).update())
+                        .isInstanceOfSatisfying(org.springframework.dao.DataIntegrityViolationException.class,
+                                e -> assertThat(lk.serenetravels.masterdataservice.util.SqlErrors.sqlState(e)).isEqualTo("23514"));
+            }
+
+            // ---- reads work against the real (currently empty) tables
+            assertThat(restaurants.list(null, null, null, "monday", null, null, 0, 20).totalElements())
+                    .isLessThanOrEqualTo(before.get("restaurant"));
+
+            // ---- writes against session-local shadows only
+            for (String table : realTables) {
+                jdbc.sql("create temp table " + table + " (like public." + table + " including all)").update();
+            }
+            int destinationId = jdbc.sql("select min(id) from public.destination").query(Integer.class).single();
+            int vegetarian = jdbc.sql("select id from public.dietary_category where name = 'Vegetarian'").query(Integer.class).single();
+            int halal = jdbc.sql("select id from public.dietary_category where name = 'Halal'").query(Integer.class).single();
+
+            RestaurantResponse created = restaurants.create(new java.util.LinkedHashMap<>(Map.of(
+                    "name", "Smoke Kitchen", "destinationId", destinationId,
+                    "closedDays", List.of("sunday", "Monday", "saturday"), "dietaryCategoryIds", List.of(vegetarian, halal))));
+            assertThat(created.closedDays()).containsExactly("MONDAY", "SATURDAY", "SUNDAY");
+            // stored using the database's own numbers: Sunday = 0, Monday = 1, Saturday = 6
+            assertThat(jdbc.sql("select day_of_week from restaurant_closed_day where restaurant_id = :id order by day_of_week")
+                    .param("id", created.id()).query(Integer.class).list()).containsExactly(0, 1, 6);
+
+            assertThatThrownBy(() -> restaurants.create(new java.util.LinkedHashMap<>(Map.of(
+                    "name", "SMOKE KITCHEN", "destinationId", destinationId))))
+                    .isInstanceOfSatisfying(ConflictException.class, e -> assertThat(e.getCode()).isEqualTo("DUPLICATE"));
+            assertThat(restaurants.list(null, null, halal, "sunday", null, null, 0, 20).content()).hasSize(1);
+            assertThat(restaurants.list(null, null, null, null, "tuesday", null, 0, 20).content()).hasSize(1);
+            assertThat(restaurants.list(null, null, null, null, "monday", null, 0, 20).content()).isEmpty();
+
+            assertThat(restaurants.replaceClosedDays(created.id(), List.of("Friday", "Thursday"))).containsExactly("THURSDAY", "FRIDAY");
+            assertThat(restaurants.replaceDietary(created.id(), List.of(halal))).hasSize(1);
+            restaurants.delete(created.id());
+            assertThat(count(jdbc, "restaurant")).isZero();
+            assertThat(count(jdbc, "restaurant_closed_day")).isZero();
+            assertThat(count(jdbc, "restaurant_dietary_capability")).isZero();
 
             // ---- the real tables are exactly as they were
             for (String table : realTables) {

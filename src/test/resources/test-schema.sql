@@ -101,6 +101,23 @@ create table guide_language (
     primary key (guide_id, language_id)
 );
 
+create table restaurant (
+    id integer generated always as identity primary key,
+    destination_id integer not null references destination (id),
+    name varchar(255) not null
+);
+-- day_of_week: 0 = Sunday .. 6 = Saturday (the real column's documented convention)
+create table restaurant_closed_day (
+    restaurant_id integer not null references restaurant (id),
+    day_of_week smallint not null check (day_of_week >= 0 and day_of_week <= 6),
+    primary key (restaurant_id, day_of_week)
+);
+create table restaurant_dietary_capability (
+    restaurant_id integer not null references restaurant (id),
+    dietary_category_id integer not null references dietary_category (id),
+    primary key (restaurant_id, dietary_category_id)
+);
+
 create table property (
     id integer generated always as identity primary key,
     destination_id integer not null references destination (id),

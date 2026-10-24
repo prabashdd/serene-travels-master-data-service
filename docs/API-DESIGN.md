@@ -126,7 +126,7 @@ Paths are relative to `/api/v1/master-data`. Every endpoint, read or write, requ
 |---|---|---|---|
 | **properties** | `GET`/`POST /properties` (`q`, `destinationId`, `active`, `starRating`) | `GET`/`PATCH`/`DELETE /properties/{id}` (`include=rates`) | `POST /properties/{id}/room-types`; `PATCH`/`DELETE /room-types/{id}`; `PUT /properties/{id}/child-rules`; `PUT /properties/{id}/inclusions`; `PUT /properties/{id}/dietary`; `PUT /properties/{id}/baby-cot`; `PUT /properties/{id}/rates` (grid) |
 | **attractions** | `GET`/`POST /attractions` (`q`, `destinationId`, `safari`, `pricingMethod`) | `GET`/`PATCH`/`DELETE /attractions/{id}` | `PUT`/`DELETE /attractions/{id}/tuk-tuk` give the attraction a tuk-tuk option (returns the `locationId` the fare is keyed by); the fare itself is a `tuk-tuk` rate |
-| **restaurants** | `GET`/`POST /restaurants` | `GET`/`PATCH`/`DELETE` | `PUT /restaurants/{id}/closed-days`; `PUT /restaurants/{id}/dietary` |
+| **restaurants** | `GET`/`POST /restaurants` (`q`, `destinationId`, `dietaryCategoryId`, `closedOn`, `openOn`) | `GET`/`PATCH`/`DELETE /restaurants/{id}` | `PUT /restaurants/{id}/closed-days` (day names) and `PUT /restaurants/{id}/dietary` (category ids) replace the sets; `POST` also accepts `closedDays` and `dietaryCategoryIds` |
 | **packages** | `GET`/`POST /packages` | `GET`/`PATCH`/`DELETE` | `PUT /packages/{id}/sites` |
 | **vehicles** | `GET`/`POST /vehicles` (`q`, `vehicleTypeId`, `method`, `active`, `expiringWithinDays`) | `GET`/`PATCH`/`DELETE /vehicles/{id}` | — (the driver and assistant are plain fields: `driverId`, `assistantId`) |
 | **drivers** | `GET`/`POST /drivers` (`q` over name / NIC / phone / licence, `role`, `active`, `chauffeur`) | `GET`/`PATCH`/`DELETE /drivers/{id}` | each person lists the vehicles they are assigned to |
@@ -259,7 +259,8 @@ Master data is an **internal back-office service**. Roles are the ones user-serv
 | Attractions: list / search / sort with current prices, one-attraction aggregate, create, quick edit, delete, tuk-tuk option | ✅ built |
 | Vehicles and drivers: list / search / sort, create, quick edit, soft delete, expiry and driver warnings, role rules | ✅ built |
 | Guides: list / search / sort / filter by language, create (optionally with languages), quick edit, soft delete, replace languages | ✅ built |
-| Aggregates: restaurants, packages, promotions, distances, articles | ⏳ not built |
+| Restaurants: list / search / filter (dietary, closed or open on a day), create (optionally with days and dietary), rename / move, delete, replace closed days and dietary support | ✅ built |
+| Aggregates: packages, promotions, distances, articles | ⏳ not built |
 | Alerts, import / export | ⏳ not built |
 | Rate list `sort` | Not supported on `GET /rates/{family}`: rows are always newest-first (`effective_from desc`) |
 | Promotion value unit | USD until `promotion.type` has agreed values (a percentage promotion would be PERCENT) |
@@ -275,7 +276,7 @@ Tests: unit and HTTP tests run on in-memory H2 (PostgreSQL mode). `LivePostgresS
 - Attraction list rows carry a compact `currentRates` (`rateType`, `rate`, `unit`) so a table can show prices without a second call; the single-attraction response carries the full rate rows. `FIXED_GROUP_PLUS_EXTRA` attractions must have a `fixedGroupSize`; `PER_PERSON` ones must not. An attraction name is unique within its destination.
 - Currency: `misc` and `package` are USD; `tuk-tuk` is LKR (with vehicle and transport per-km). Tax is PERCENT. **Guide accommodation is LKR** (the supplied data says "LKR 4500") - the rate family in the code still says USD and needs correcting.
 - Rate intervals are half-open `[from, to)`, matching the existing `CHECK (effective_to > effective_from)`. Note that existing seasons use inclusive end dates, so no one should hand-enter `effective_to` as an inclusive last day.
-- `restaurant_closed_day.day_of_week` is ISO (1 = Monday … 7 = Sunday).
+- Restaurant closed days are exchanged as **day names** (`MONDAY` … `SUNDAY`, any letter case accepted, returned Monday-first), matching the business template. They are stored in `restaurant_closed_day.day_of_week` as the database documents it: **0 = Sunday … 6 = Saturday** (an earlier draft of this spec wrongly assumed ISO 1-7). A restaurant name is unique within its destination; deleting a restaurant also removes its closed days and dietary links.
 - `attraction.pricing_method` (`PER_PERSON` / `FIXED_GROUP_PLUS_EXTRA`) and `attraction_rate.rate_type` (seven values, see §5.1) are closed lists enforced by the database; the API validates them and publishes them (the rate families endpoint lists the allowed rate types). `vehicle.method` (`INTERNAL` / `CONTRACTED`), `driver.role` (`DRIVER` / `ASSISTANT`) and `guide.guide_type` (`DRIVER` / `CHAUFFEUR_GUIDE` / `NATIONAL_GUIDE`) are closed lists enforced by the database and validated by the API. Introduce closed enums later, once the full value sets are known.
 - Rate corrections via `PATCH` rely on `created_by` only in v1. A `rate_audit` table (§5.2) is a recommended follow-up, not part of v1.
 
