@@ -1132,10 +1132,12 @@ paths:
         - $ref: '#/components/parameters/Sort'
         - $ref: '#/components/parameters/Q'
         - $ref: '#/components/parameters/DestinationId'
-        - { name: category, in: query, schema: { type: string } }
+        - { name: category, in: query, schema: { $ref: '#/components/schemas/InfoArticleCategory' } }
+        - { name: includeCountryWide, in: query, description: 'With destinationId: also return the articles that apply to the whole country', schema: { type: boolean, default: false } }
+        - { name: countryWide, in: query, description: 'true = only country-wide articles, false = only destination-specific', schema: { type: boolean } }
       responses:
         '200':
-          description: Page of articles
+          description: Page of articles (excerpt only, not the body)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/InfoArticlePage' }
@@ -1143,6 +1145,7 @@ paths:
       tags: [Distances & Articles]
       operationId: createInfoArticle
       summary: Create an article
+      description: 'Required: category, title (at most 200 characters), body (plain text, at most 20,000). Leave destinationId out for a country-wide article. The same title in the same category for the same destination can only be added once (409 DUPLICATE).'
       requestBody:
         required: true
         content:
@@ -1155,6 +1158,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/InfoArticle' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /info-articles/{id}:
     parameters:
       - $ref: '#/components/parameters/Id'
@@ -1173,6 +1177,7 @@ paths:
       tags: [Distances & Articles]
       operationId: updateInfoArticle
       summary: Quick edit
+      description: Send only the fields that changed. Send destinationId null to make the article country-wide.
       requestBody:
         required: true
         content:
@@ -1185,6 +1190,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/InfoArticle' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
     delete:
       tags: [Distances & Articles]
       operationId: deleteInfoArticle
@@ -2135,24 +2141,43 @@ components:
             content:
               type: array
               items: { $ref: '#/components/schemas/LocationDistance' }
+    InfoArticleCategory:
+      type: string
+      description: Any letter case is accepted and normalised to upper case.
+      enum: [TRAVEL_TIP, VISA, WEATHER, GENERAL]
     InfoArticle:
       type: object
       properties:
         id: { type: integer }
-        category: { type: string }
+        category: { $ref: '#/components/schemas/InfoArticleCategory' }
+        destination:
+          allOf:
+            - $ref: '#/components/schemas/Ref'
+          nullable: true
+          description: Null for an article that applies to the whole country
+        title: { type: string }
+        body: { type: string, description: 'Plain text, line breaks kept' }
+    InfoArticleSummary:
+      type: object
+      description: A row of the article list - no body
+      properties:
+        id: { type: integer }
+        category: { $ref: '#/components/schemas/InfoArticleCategory' }
         destination:
           allOf:
             - $ref: '#/components/schemas/Ref'
           nullable: true
         title: { type: string }
-        body: { type: string, description: Omitted from list rows }
+        excerpt: { type: string, description: 'First 140 characters on one line; a short all-capitals first line repeating the place name is skipped' }
+        bodyLength: { type: integer }
     InfoArticleInput:
       type: object
+      description: 'Required on create: category, title, body.'
       properties:
-        category: { type: string }
+        category: { $ref: '#/components/schemas/InfoArticleCategory' }
         destinationId: { type: integer, nullable: true }
-        title: { type: string }
-        body: { type: string }
+        title: { type: string, maxLength: 200 }
+        body: { type: string, maxLength: 20000 }
     InfoArticlePage:
       allOf:
         - $ref: '#/components/schemas/PageMeta'
@@ -2160,7 +2185,7 @@ components:
           properties:
             content:
               type: array
-              items: { $ref: '#/components/schemas/InfoArticle' }
+              items: { $ref: '#/components/schemas/InfoArticleSummary' }
 
     # ------------------------------------------------------------ rates
     RateFamilyName:

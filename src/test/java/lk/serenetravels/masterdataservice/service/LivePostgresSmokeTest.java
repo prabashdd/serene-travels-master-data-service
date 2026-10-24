@@ -7,6 +7,8 @@ import lk.serenetravels.masterdataservice.dto.ChildRuleRequest;
 import lk.serenetravels.masterdataservice.dto.DietarySupportRequest;
 import lk.serenetravels.masterdataservice.dto.DriverResponse;
 import lk.serenetravels.masterdataservice.dto.GuideResponse;
+import lk.serenetravels.masterdataservice.dto.InfoArticleResponse;
+import lk.serenetravels.masterdataservice.dto.InfoArticleSummaryResponse;
 import lk.serenetravels.masterdataservice.dto.LocationDistanceResponse;
 import lk.serenetravels.masterdataservice.dto.PackageResponse;
 import lk.serenetravels.masterdataservice.dto.PageResponse;
@@ -23,6 +25,7 @@ import lk.serenetravels.masterdataservice.exception.ConflictException;
 import lk.serenetravels.masterdataservice.service.impl.AttractionServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.DriverServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.GuideServiceImpl;
+import lk.serenetravels.masterdataservice.service.impl.InfoArticleServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.LocationDistanceServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.LookupServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.PackageServiceImpl;
@@ -663,6 +666,57 @@ class LivePostgresSmokeTest {
 
             // ---- the real table is exactly as it was
             assertThat(count(jdbc, "public.location_distance")).isEqualTo(before);
+        }
+    }
+
+    @Test
+    void articlesReadTheRealTextAndWriteOnlyToSessionLocalCopies() throws Exception {
+        try (SingleConnectionDataSource dataSource = new SingleConnectionDataSource(URL, "postgres", "postgres", true)) {
+            JdbcClient jdbc = JdbcClient.create(dataSource);
+            InfoArticleServiceImpl articles = new InfoArticleServiceImpl(jdbc);
+
+            long before = count(jdbc, "public.info_article");
+
+            // ---- reads against the real articles
+            PageResponse<InfoArticleSummaryResponse> all = articles.list(null, null, null, false, null, List.of("title,asc"), 0, 200);
+            assertThat(all.totalElements()).isEqualTo(before);
+            assertThat(all.content()).isNotEmpty().allSatisfy(a -> {
+                assertThat(a.excerpt()).isNotBlank().doesNotContain("\n");
+                assertThat(a.bodyLength()).isPositive();
+            });
+            InfoArticleSummaryResponse first = all.content().get(0);
+            InfoArticleResponse full = articles.get(first.id());
+            assertThat(full.body()).hasSize(first.bodyLength());           // the list's length matches the real body
+            assertThat(articles.list("beach", null, null, false, null, null, 0, 10).totalElements()).isPositive();   // body search
+
+            // ---- the real database only accepts the four categories the API publishes
+            assertThatThrownBy(() -> jdbc.sql("insert into public.info_article (category, title, body) values ('GOSSIP', 't', 'b')").update())
+                    .isInstanceOfSatisfying(org.springframework.dao.DataIntegrityViolationException.class,
+                            e -> assertThat(lk.serenetravels.masterdataservice.util.SqlErrors.sqlState(e)).isEqualTo("23514"));
+
+            // ---- writes against a session-local shadow only (the real check constraint is kept)
+            jdbc.sql("create temp table info_article (like public.info_article including all)").update();
+            int destinationId = jdbc.sql("select min(id) from public.destination").query(Integer.class).single();
+
+            InfoArticleResponse created = articles.create(new java.util.LinkedHashMap<>(Map.of(
+                    "category", "travel_tip", "destinationId", destinationId, "title", "Smoke tip",
+                    "body", "SMOKE\nLine one.\nLine two.")));
+            assertThat(created.body()).isEqualTo("SMOKE\nLine one.\nLine two.");
+            assertThatThrownBy(() -> articles.create(new java.util.LinkedHashMap<>(Map.of(
+                    "category", "TRAVEL_TIP", "destinationId", destinationId, "title", "SMOKE TIP", "body", "again"))))
+                    .isInstanceOfSatisfying(ConflictException.class, e -> assertThat(e.getCode()).isEqualTo("DUPLICATE"));
+            InfoArticleResponse visa = articles.create(new java.util.LinkedHashMap<>(Map.of(
+                    "category", "VISA", "title", "Smoke visa", "body", "Country-wide.")));
+            assertThat(articles.list(null, null, destinationId, true, null, List.of("title,asc"), 0, 10).content())
+                    .extracting(InfoArticleSummaryResponse::title).containsExactly("Smoke tip", "Smoke visa");
+            assertThat(articles.update(visa.id(), new java.util.LinkedHashMap<>(Map.of("destinationId", destinationId))).destination())
+                    .isNotNull();
+            articles.delete(created.id());
+            articles.delete(visa.id());
+            assertThat(count(jdbc, "info_article")).isZero();
+
+            // ---- the real table is exactly as it was
+            assertThat(count(jdbc, "public.info_article")).isEqualTo(before);
         }
     }
 

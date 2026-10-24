@@ -263,6 +263,16 @@ create table location_distance (
     unique (from_destination_id, to_destination_id, route_type)
 );
 
+-- NOTE: the real info_article.category has a CHECK on TRAVEL_TIP / VISA / WEATHER / GENERAL, left out here for the same
+-- H2 reason as the other string lists; the service validates it and LivePostgresSmokeTest covers the real constraint.
+create table info_article (
+    id integer generated always as identity primary key,
+    category varchar(50) not null,
+    destination_id integer references destination (id),
+    title varchar(1000) not null,
+    body varchar(100000) not null
+);
+
 create table property_rate (
     id integer generated always as identity primary key,
     property_id integer not null,
