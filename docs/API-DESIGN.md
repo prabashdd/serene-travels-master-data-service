@@ -1,6 +1,8 @@
 # master-data-service — API design
 
 Status: **draft v0.1**. Companion file: [`openapi.yaml`](openapi.yaml) (the machine-readable skeleton of everything below).
+
+> **The reference for what is actually built is [`API-REFERENCE.md`](API-REFERENCE.md)** - generated from the code and real sample calls, and checked by a test so it cannot go stale (see [`api-reference/README.md`](api-reference/README.md)). This design document and `openapi.yaml` record the intent and the decisions behind it; where they differ from the reference, the reference is right.
 Data source: the `tour-management` Postgres schema (41 tables, see [Data model → API map](#3-data-model--api-map)).
 
 ## 1. Principles
