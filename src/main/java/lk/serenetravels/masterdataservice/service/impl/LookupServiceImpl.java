@@ -145,6 +145,7 @@ public class LookupServiceImpl implements LookupService {
                 row.put(column.json(), switch (column.type()) {
                     case TEXT -> rs.getString(column.db());
                     case INT -> rs.getObject(column.db(), Integer.class);
+                    case DECIMAL -> rs.getBigDecimal(column.db());
                     case DATE -> rs.getObject(column.db(), LocalDate.class);
                     case BOOL -> rs.getObject(column.db(), Boolean.class);
                 });

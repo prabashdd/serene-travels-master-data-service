@@ -7,6 +7,7 @@ import lk.serenetravels.masterdataservice.dto.ChildRuleRequest;
 import lk.serenetravels.masterdataservice.dto.DietarySupportRequest;
 import lk.serenetravels.masterdataservice.dto.DriverResponse;
 import lk.serenetravels.masterdataservice.dto.GuideResponse;
+import lk.serenetravels.masterdataservice.dto.LocationDistanceResponse;
 import lk.serenetravels.masterdataservice.dto.PackageResponse;
 import lk.serenetravels.masterdataservice.dto.PageResponse;
 import lk.serenetravels.masterdataservice.dto.PromotionResponse;
@@ -22,6 +23,7 @@ import lk.serenetravels.masterdataservice.exception.ConflictException;
 import lk.serenetravels.masterdataservice.service.impl.AttractionServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.DriverServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.GuideServiceImpl;
+import lk.serenetravels.masterdataservice.service.impl.LocationDistanceServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.LookupServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.PackageServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.PromotionServiceImpl;
@@ -606,6 +608,61 @@ class LivePostgresSmokeTest {
             for (String table : realTables) {
                 assertThat(count(jdbc, "public." + table)).as(table).isEqualTo(before.get(table));
             }
+        }
+    }
+
+    @Test
+    void distancesReadTheRealRowsBothWaysAndWriteOnlyToSessionLocalCopies() throws Exception {
+        try (SingleConnectionDataSource dataSource = new SingleConnectionDataSource(URL, "postgres", "postgres", true)) {
+            JdbcClient jdbc = JdbcClient.create(dataSource);
+            LocationDistanceServiceImpl distances = new LocationDistanceServiceImpl(jdbc);
+
+            long before = count(jdbc, "public.location_distance");
+
+            // ---- reads against the real rows
+            PageResponse<LocationDistanceResponse> all = distances.list(null, null, null, null, null, null, null, 0, 5);
+            assertThat(all.totalElements()).isEqualTo(before);
+            assertThat(all.content()).isNotEmpty().allSatisfy(d -> assertThat(d.from().name()).isNotBlank());
+
+            // the suspect-row filter agrees with a direct count of the same rule
+            long suspect = jdbc.sql("select count(*) from public.location_distance where from_destination_id = to_destination_id "
+                    + "or distance_km <= 0").query(Long.class).single();
+            assertThat(distances.list(null, null, null, null, null, true, null, 0, 5).totalElements()).isEqualTo(suspect);
+            assertThat(distances.list(null, null, null, null, null, false, null, 0, 5).totalElements()).isEqualTo(before - suspect);
+
+            // a pair stored in one direction is found from both ends
+            LocationDistanceResponse stored = distances.list(null, null, null, null, null, false, List.of("id,asc"), 0, 1).content().get(0);
+            List<LocationDistanceResponse> forward = distances.between(stored.from().id(), stored.to().id());
+            List<LocationDistanceResponse> backward = distances.between(stored.to().id(), stored.from().id());
+            assertThat(forward).extracting(LocationDistanceResponse::id).contains(stored.id())
+                    .containsExactlyElementsOf(backward.stream().map(LocationDistanceResponse::id).toList());
+
+            // the real UNIQUE (from, to, route_type) is what backs the duplicate rule
+            assertThatThrownBy(() -> jdbc.sql("insert into public.location_distance (from_destination_id, to_destination_id, "
+                    + "route_type, distance_km) values (:f, :t, :r, 1)").param("f", stored.from().id())
+                    .param("t", stored.to().id()).param("r", stored.routeType()).update())
+                    .isInstanceOfSatisfying(org.springframework.dao.DataIntegrityViolationException.class,
+                            e -> assertThat(lk.serenetravels.masterdataservice.util.SqlErrors.sqlState(e)).isEqualTo("23505"));
+
+            // ---- writes against a session-local shadow only (the real unique constraint is kept)
+            jdbc.sql("create temp table location_distance (like public.location_distance including all)").update();
+            int a = stored.from().id();
+            int b = stored.to().id();
+
+            LocationDistanceResponse created = distances.create(new java.util.LinkedHashMap<>(Map.of(
+                    "fromDestinationId", a, "toDestinationId", b, "routeType", "road", "distanceKm", 123.4, "durationMinutes", 200)));
+            assertThat(created.distanceKm()).isEqualByComparingTo("123.4");     // numeric(6,1) keeps one decimal
+            assertThatThrownBy(() -> distances.create(new java.util.LinkedHashMap<>(Map.of(
+                    "fromDestinationId", b, "toDestinationId", a, "routeType", "ROAD", "distanceKm", 5))))
+                    .isInstanceOfSatisfying(ConflictException.class, e -> assertThat(e.getCode()).isEqualTo("DUPLICATE"));
+            assertThat(distances.between(b, a)).hasSize(1);        // the shadow hides the real rows for this session
+            assertThat(distances.update(created.id(), new java.util.LinkedHashMap<>(Map.of("distanceKm", 130))).distanceKm())
+                    .isEqualByComparingTo("130");
+            distances.delete(created.id());
+            assertThat(count(jdbc, "location_distance")).isZero();
+
+            // ---- the real table is exactly as it was
+            assertThat(count(jdbc, "public.location_distance")).isEqualTo(before);
         }
     }
 

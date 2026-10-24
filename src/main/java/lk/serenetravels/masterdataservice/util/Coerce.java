@@ -32,6 +32,20 @@ public final class Coerce {
         throw InvalidRequestException.field(field, "must be a whole number");
     }
 
+    public static BigDecimal toDecimal(Object value, String field) {
+        try {
+            if (value instanceof Number number) {
+                return new BigDecimal(number.toString());
+            }
+            if (value instanceof String text && !text.isBlank()) {
+                return new BigDecimal(text.trim());
+            }
+        } catch (NumberFormatException ex) {
+            // fall through to the shared message below
+        }
+        throw InvalidRequestException.field(field, "must be a number");
+    }
+
     public static String toText(Object value, String field) {
         if (value instanceof String text && !text.isBlank()) {
             return text.trim();

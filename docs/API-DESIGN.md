@@ -132,7 +132,7 @@ Paths are relative to `/api/v1/master-data`. Every endpoint, read or write, requ
 | **drivers** | `GET`/`POST /drivers` (`q` over name / NIC / phone / licence, `role`, `active`, `chauffeur`) | `GET`/`PATCH`/`DELETE /drivers/{id}` | each person lists the vehicles they are assigned to |
 | **guides** | `GET`/`POST /guides` (`q` over name / nickname / guide no / NIC / phone / email / town, `guideType`, `languageId`, `active`) | `GET`/`PATCH`/`DELETE /guides/{id}` | `PUT /guides/{id}/languages` replaces the set of language ids; `POST` also accepts `languageIds` to set them in the same call |
 | **promotions** | `GET`/`POST /promotions` (`q`, `type`, `active`, `validOn`, `destinationId`, `seasonId`, `at`) | `GET`/`PATCH`/`DELETE /promotions/{id}` (delete = deactivate) | value via family `promotion` (`PUT /rates/promotion`) |
-| **location-distances** | `GET`/`POST` (`fromDestinationId`, `toDestinationId`) | `GET`/`PATCH`/`DELETE` | — |
+| **location-distances** | `GET`/`POST /location-distances` (`q`, `destinationId`, `fromDestinationId`, `toDestinationId`, `routeType`, `needsReview`) | `GET`/`PATCH`/`DELETE /location-distances/{id}` | `GET /location-distances/between?fromDestinationId&toDestinationId` - every route between two destinations, either direction |
 | **info-articles** | `GET`/`POST` (`category`, `destinationId`) | `GET`/`PATCH`/`DELETE` | — |
 
 `PUT` on a child collection **replaces the whole set** (send the full list). That is intentionally simpler for the FE than add/remove diffs; it is only used for collections nothing else references by id (child rules, inclusions, dietary, closed days, languages, package sites). Room types are real CRUD because rates point at them.
@@ -262,7 +262,8 @@ Master data is an **internal back-office service**. Roles are the ones user-serv
 | Restaurants: list / search / filter (dietary, closed or open on a day), create (optionally with days and dietary), rename / move, delete, replace closed days and dietary support | ✅ built |
 | Packages: list / search / filter by included site, create (optionally with sites), rename, delete, replace sites; current price shown (priced via `/rates/package`) | ✅ built |
 | Promotions: list / search / filter, create, quick edit, soft delete, status and current value shown; value unit follows the type (rate engine reports PERCENT and caps at 100 for percentage promotions) | ✅ built |
-| Aggregates: distances, articles | ⏳ not built |
+| Location distances: list / search / filter, between-two-destinations lookup (either direction), create, quick edit, delete, suspect-row filter | ✅ built |
+| Aggregates: articles | ⏳ not built |
 | Alerts, import / export | ⏳ not built |
 | Rate list `sort` | Not supported on `GET /rates/{family}`: rows are always newest-first (`effective_from desc`) |
 | Promotion value unit | Follows `promotion.type`: PERCENT for `PERCENTAGE`, USD for `FIXED_AMOUNT`. `COMPLIMENTARY` is treated as USD for now - what its value means (the worth of the freebie? a quantity?) is not defined anywhere, so confirm before relying on it |
@@ -283,9 +284,12 @@ Tests: unit and HTTP tests run on in-memory H2 (PostgreSQL mode). `LivePostgresS
 - Rate corrections via `PATCH` rely on `created_by` only in v1. A `rate_audit` table (§5.2) is a recommended follow-up, not part of v1.
 
 - Promotions: `type` is a closed list enforced by the database (`PERCENTAGE`, `FIXED_AMOUNT`, `COMPLIMENTARY`), accepted in any letter case. A promotion runs from `validFrom` up to, **not including**, `validTo` (half-open, like rates); the database requires `validTo > validFrom`. A null `destinationId` / `seasonId` / `minGroupSize` means no limit. `status` is worked out for the requested date: `INACTIVE`, `UPCOMING`, `RUNNING` or `ENDED`. The type cannot change once a value exists (409 `TYPE_LOCKED`). Names are not unique (the database does not require it). Stacking and minimum-spend rules are undecided in the source requirements and are not modelled.
+- Location distances: a row is one road option between two destinations (`routeType` `ROAD` / `ROADA` / `ROADB` in the legacy data; the database does not restrict it, so the API accepts any 1-30 letters, digits or underscores, upper-cased). Most pairs are stored in **one direction only** (6,321 rows, only 234 have a reverse row), so "how far is A from B" must use `/location-distances/between`, which looks both ways. New rows must have two different destinations, `distanceKm` above zero (max 5000, one decimal place - the column is `numeric(6,1)`) and an optional `durationMinutes` of 1-2880. The same pair with the same route type may be recorded **once, in either direction** (409 `DUPLICATE`); this is only re-checked when a row's ends or route type change, so the few legacy pairs held both ways stay editable. Hard delete - nothing refers to a distance.
 - AGENT has no access to this service; agents see prices only through quotations (D4). `technical_visit_category` is soft-deleted (D5).
 
 **Still open**
+
+0. **Suspect rows in `location_distance`.** 222 rows point a destination at itself and 34 have a distance of zero or less (one is -100). They are loaded as they were; `GET /location-distances?needsReview=true` lists them (`needsReview` is also on every row) and `PATCH` fixes one - but only with a full valid row, so a self-pointing row needs its corrected `toDestinationId` (and, if that pair already has the route type, a different `routeType` or deleting it). 6 pairs held both ways also disagree on the distance. None of this has been changed without a decision.
 
 1. **Legacy rate end dates are inclusive.** All 3,074 hotel rates in the database are `legacy_import` rows from 2018-2024 whose `effective_to` is the last valid day (e.g. 2019-10-31, with the next rate starting 2019-11-01). The rate engine treats `effective_to` as exclusive, so a legacy rate appears to end one day early. Decide one convention and either adjust the engine or convert the legacy rows. Also note that every one of those rates has expired (the latest ended 2024-10-31), so no hotel has a current rate and the hotel list's `fromRate` is empty until current rates are entered.
 2. **Service-account role name and flow** for `GET /rates/resolve`. `QUOTATION_SERVICE` via Keycloak client-credentials is proposed in §9; it needs a Keycloak client and role created when the quotation service is built.

@@ -1035,8 +1035,12 @@ paths:
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/Size'
         - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Q'
+        - { name: destinationId, in: query, description: 'Either end is this destination', schema: { type: integer } }
         - { name: fromDestinationId, in: query, schema: { type: integer } }
         - { name: toDestinationId, in: query, schema: { type: integer } }
+        - { name: routeType, in: query, description: 'e.g. ROAD, ROADA, ROADB', schema: { type: string } }
+        - { name: needsReview, in: query, description: 'true = only suspect rows (a destination to itself, or a distance not above zero)', schema: { type: boolean } }
       responses:
         '200':
           description: Page of distances
@@ -1047,6 +1051,7 @@ paths:
       tags: [Distances & Articles]
       operationId: createLocationDistance
       summary: Add a distance
+      description: 'Required: fromDestinationId, toDestinationId (different), routeType, distanceKm (above zero, at most 5000, one decimal place). Optional: durationMinutes (1-2880). The same two destinations with the same route type, in either direction, can only be recorded once (409 DUPLICATE).'
       requestBody:
         required: true
         content:
@@ -1060,13 +1065,43 @@ paths:
               schema: { $ref: '#/components/schemas/LocationDistance' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
+  /location-distances/between:
+    get:
+      tags: [Distances & Articles]
+      operationId: distancesBetween
+      summary: Every route between two destinations, whichever way round it is stored
+      description: Most pairs are stored in one direction only, so this looks both ways. Shortest first; an empty list means no distance is recorded.
+      parameters:
+        - { name: fromDestinationId, in: query, required: true, schema: { type: integer } }
+        - { name: toDestinationId, in: query, required: true, schema: { type: integer } }
+      responses:
+        '200':
+          description: Route options
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/LocationDistance' }
+        '400': { $ref: '#/components/responses/BadRequest' }
   /location-distances/{id}:
     parameters:
       - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Distances & Articles]
+      operationId: getLocationDistance
+      summary: One distance
+      responses:
+        '200':
+          description: Distance
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LocationDistance' }
+        '404': { $ref: '#/components/responses/NotFound' }
     patch:
       tags: [Distances & Articles]
       operationId: updateLocationDistance
       summary: Quick edit
+      description: 'Send null for durationMinutes to clear it. The row as it will look must be valid, so fixing a row flagged needsReview means sending the corrected field(s) in the same call.'
       requestBody:
         required: true
         content:
@@ -2079,17 +2114,19 @@ components:
         id: { type: integer }
         from: { $ref: '#/components/schemas/Ref' }
         to: { $ref: '#/components/schemas/Ref' }
-        routeType: { type: string }
+        routeType: { type: string, description: 'Legacy values ROAD, ROADA, ROADB; upper-cased' }
         distanceKm: { type: number }
         durationMinutes: { type: integer, nullable: true }
+        needsReview: { type: boolean, description: 'True for a destination pointing at itself or a distance not above zero' }
     LocationDistanceInput:
       type: object
+      description: 'Required on create: fromDestinationId, toDestinationId, routeType, distanceKm.'
       properties:
         fromDestinationId: { type: integer }
-        toDestinationId: { type: integer }
-        routeType: { type: string }
-        distanceKm: { type: number }
-        durationMinutes: { type: integer }
+        toDestinationId: { type: integer, description: Must differ from fromDestinationId }
+        routeType: { type: string, description: '1-30 letters, digits or underscores' }
+        distanceKm: { type: number, description: 'Above zero, at most 5000, one decimal place' }
+        durationMinutes: { type: integer, nullable: true, minimum: 1, maximum: 2880 }
     LocationDistancePage:
       allOf:
         - $ref: '#/components/schemas/PageMeta'

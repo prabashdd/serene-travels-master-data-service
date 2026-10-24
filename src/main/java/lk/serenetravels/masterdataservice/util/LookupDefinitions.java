@@ -13,6 +13,7 @@ public final class LookupDefinitions {
     public enum Type {
         TEXT,
         INT,
+        DECIMAL,
         DATE,
         BOOL
     }

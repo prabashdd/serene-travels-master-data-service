@@ -252,6 +252,17 @@ create table promotion_value (
     check (effective_to is null or effective_to > effective_from)
 );
 
+-- Like the real table, nothing stops a destination pointing at itself or a distance of zero: the service does.
+create table location_distance (
+    id integer generated always as identity primary key,
+    from_destination_id integer not null references destination (id),
+    to_destination_id integer not null references destination (id),
+    route_type varchar(255) not null,
+    distance_km numeric(6, 1) not null,
+    duration_minutes integer,
+    unique (from_destination_id, to_destination_id, route_type)
+);
+
 create table property_rate (
     id integer generated always as identity primary key,
     property_id integer not null,

@@ -47,6 +47,7 @@ public final class ColumnValues {
                 values.put(column.json(), switch (column.type()) {
                     case TEXT -> Coerce.toText(raw, column.json());
                     case INT -> Coerce.toInt(raw, column.json());
+                    case DECIMAL -> Coerce.toDecimal(raw, column.json());
                     case DATE -> Coerce.toDate(raw, column.json());
                     case BOOL -> Coerce.toBool(raw, column.json());
                 });
