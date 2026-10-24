@@ -33,6 +33,17 @@ final class ApiReferenceRenderer {
         String key() {
             return method + " " + template;
         }
+
+        // "GET /api/v1/master-data/rates/attraction?history=true", as it would be typed.
+        String requestLine() {
+            String queryText = query.isEmpty() ? ""
+                    : "?" + query.stream().map(q -> q[0] + "=" + q[1]).collect(Collectors.joining("&"));
+            return method + " " + path + queryText;
+        }
+
+        String statusName() {
+            return STATUS_NAMES.getOrDefault(status, "");
+        }
     }
 
     private final Map<String, Object> apiDocs;
@@ -98,14 +109,87 @@ final class ApiReferenceRenderer {
         return index < 0 ? AREA_ORDER.size() : index;
     }
 
-    // ------------------------------------------------------------------ rendering
+    // ------------------------------------------------------------------ the model (what both Markdown and HTML show)
+
+    record Param(String name, String in, String type, boolean required, String defaultValue, String note) {
+    }
+
+    /** One endpoint, with everything a reader needs, already worked out. */
+    record Op(String key, String method, String path, String shortPath, String anchor, String summary,
+              String description, String roles, List<Param> params, String bodyDescription, List<String[]> bodyRows,
+              List<String[]> responseRows, List<Sample> samples) {
+    }
+
+    record Area(String name, String description, List<Op> ops) {
+    }
+
+    List<Sample> commonSamples() {
+        return commonSamples;
+    }
+
+    String intro() {
+        return intro;
+    }
+
+    List<Area> areas() {
+        Map<String, List<Op>> byArea = new LinkedHashMap<>();
+        for (Operation operation : operations()) {
+            byArea.computeIfAbsent(operation.tag(), k -> new ArrayList<>()).add(op(operation));
+        }
+        List<Area> areas = new ArrayList<>();
+        byArea.forEach((name, ops) -> areas.add(new Area(name, areaDescription(name).strip(), ops)));
+        return areas;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Op op(Operation operation) {
+        Map<String, Object> spec = operation.spec();
+        String description = (String) spec.get("description");
+
+        List<Param> params = new ArrayList<>();
+        for (Map<String, Object> parameter : (List<Map<String, Object>>) spec.getOrDefault("parameters", List.of())) {
+            if (Boolean.TRUE.equals(parameter.get("hidden"))) {
+                continue;
+            }
+            Map<String, Object> schema = (Map<String, Object>) parameter.getOrDefault("schema", Map.of());
+            Object defaultValue = schema.get("default");
+            params.add(new Param((String) parameter.get("name"), (String) parameter.get("in"), typeOf(schema),
+                    Boolean.TRUE.equals(parameter.get("required")), defaultValue == null ? null : String.valueOf(defaultValue),
+                    noteFor(parameter)));
+        }
+
+        String bodyDescription = null;
+        List<String[]> bodyRows = List.of();
+        Map<String, Object> requestBody = (Map<String, Object>) spec.get("requestBody");
+        if (requestBody != null) {
+            Map<String, Object> schema = bodySchema(requestBody);
+            bodyDescription = describeBody(schema);
+            bodyRows = fieldRows(schema);
+        }
+
+        List<String[]> responseRows = List.of();
+        Map<String, Object> responses = (Map<String, Object>) spec.getOrDefault("responses", Map.of());
+        String success = responses.keySet().stream().filter(code -> code.startsWith("2")).sorted().findFirst().orElse(null);
+        if (success != null) {
+            Map<String, Object> content = (Map<String, Object>) ((Map<String, Object>) responses.get(success)).get("content");
+            if (content != null && !content.isEmpty()) {
+                Map<String, Object> media = (Map<String, Object>) content.values().iterator().next();
+                Map<String, Object> schema = (Map<String, Object>) media.get("schema");
+                responseRows = schema == null ? List.of() : fieldRows(schema);
+            }
+        }
+
+        List<Sample> samples = operationSamples.stream().filter(s -> s.key().equals(operation.key())).toList();
+        return new Op(operation.key(), operation.method().toUpperCase(), operation.path(), shortPath(operation.path()),
+                anchor(operation), operation.summary(), description == null ? "" : description.strip(),
+                roles.getOrDefault(operation.key(), "ADMIN, MANAGER"), params, bodyDescription, bodyRows, responseRows,
+                samples);
+    }
+
+    // ------------------------------------------------------------------ Markdown
 
     String render() {
-        List<Operation> operations = operations();
-        Map<String, List<Operation>> byArea = new LinkedHashMap<>();
-        for (Operation operation : operations) {
-            byArea.computeIfAbsent(operation.tag(), k -> new ArrayList<>()).add(operation);
-        }
+        List<Area> areas = areas();
 
         StringBuilder md = new StringBuilder();
         md.append("# Master Data Service - API reference\n\n");
@@ -117,29 +201,27 @@ final class ApiReferenceRenderer {
 
         md.append("## Contents\n\n");
         md.append("- [Common error responses](#common-error-responses)\n");
-        for (Map.Entry<String, List<Operation>> area : byArea.entrySet()) {
-            md.append("- [").append(area.getKey()).append("](#").append(slug(area.getKey())).append(") - ")
-                    .append(area.getValue().size()).append(" endpoints\n");
+        for (Area area : areas) {
+            md.append("- [").append(area.name()).append("](#").append(slug(area.name())).append(") - ")
+                    .append(area.ops().size()).append(" endpoints\n");
         }
         md.append('\n');
 
         renderCommonErrors(md);
 
-        for (Map.Entry<String, List<Operation>> area : byArea.entrySet()) {
-            md.append("---\n\n## ").append(area.getKey()).append("\n\n");
-            String description = areaDescription(area.getKey());
-            if (!description.isBlank()) {
-                md.append(description.strip()).append("\n\n");
+        for (Area area : areas) {
+            md.append("---\n\n## ").append(area.name()).append("\n\n");
+            if (!area.description().isBlank()) {
+                md.append(area.description()).append("\n\n");
             }
             md.append("| Method | Path | What it does |\n|---|---|---|\n");
-            for (Operation operation : area.getValue()) {
-                md.append("| `").append(operation.method().toUpperCase()).append("` | [`")
-                        .append(shortPath(operation.path())).append("`](#").append(anchor(operation)).append(") | ")
-                        .append(escapeCell(operation.summary())).append(" |\n");
+            for (Op op : area.ops()) {
+                md.append("| `").append(op.method()).append("` | [`").append(op.shortPath()).append("`](#")
+                        .append(op.anchor()).append(") | ").append(escapeCell(op.summary())).append(" |\n");
             }
             md.append('\n');
-            for (Operation operation : area.getValue()) {
-                renderOperation(md, operation);
+            for (Op op : area.ops()) {
+                renderOperation(md, op);
             }
         }
         return md.toString().replace("\r\n", "\n").stripTrailing() + "\n";
@@ -154,64 +236,38 @@ final class ApiReferenceRenderer {
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private void renderOperation(StringBuilder md, Operation operation) {
-        Map<String, Object> spec = operation.spec();
-        md.append("<a id=\"").append(anchor(operation)).append("\"></a>\n\n");
-        md.append("### `").append(operation.method().toUpperCase()).append(' ').append(shortPath(operation.path()))
-                .append("` - ").append(operation.summary()).append("\n\n");
-
-        String description = (String) spec.get("description");
-        if (description != null && !description.isBlank()) {
-            md.append(description.strip()).append("\n\n");
+    private void renderOperation(StringBuilder md, Op op) {
+        md.append("<a id=\"").append(op.anchor()).append("\"></a>\n\n");
+        md.append("### `").append(op.method()).append(' ').append(op.shortPath()).append("` - ").append(op.summary())
+                .append("\n\n");
+        if (!op.description().isBlank()) {
+            md.append(op.description()).append("\n\n");
         }
-        md.append("**Who can call it:** ").append(roles.getOrDefault(operation.key(), "ADMIN, MANAGER")).append("\n\n");
+        md.append("**Who can call it:** ").append(op.roles()).append("\n\n");
 
-        List<Map<String, Object>> parameters = ((List<Map<String, Object>>) spec.getOrDefault("parameters", List.of()))
-                .stream().filter(p -> !Boolean.TRUE.equals(p.get("hidden"))).toList();
-        if (!parameters.isEmpty()) {
+        if (!op.params().isEmpty()) {
             md.append("| Parameter | In | Type | Required | Default | Notes |\n|---|---|---|---|---|---|\n");
-            for (Map<String, Object> parameter : parameters) {
-                Map<String, Object> schema = (Map<String, Object>) parameter.getOrDefault("schema", Map.of());
-                Object defaultValue = schema.get("default");
-                md.append("| `").append(parameter.get("name")).append("` | ").append(parameter.get("in")).append(" | ")
-                        .append(escapeCell(typeOf(schema))).append(" | ")
-                        .append(Boolean.TRUE.equals(parameter.get("required")) ? "yes" : "no").append(" | ")
-                        .append(defaultValue == null ? "" : "`" + defaultValue + "`").append(" | ")
-                        .append(escapeCell(noteFor(parameter))).append(" |\n");
+            for (Param param : op.params()) {
+                md.append("| `").append(param.name()).append("` | ").append(param.in()).append(" | ")
+                        .append(escapeCell(param.type())).append(" | ").append(param.required() ? "yes" : "no").append(" | ")
+                        .append(param.defaultValue() == null ? "" : "`" + param.defaultValue() + "`").append(" | ")
+                        .append(escapeCell(param.note())).append(" |\n");
             }
             md.append('\n');
         }
 
-        Map<String, Object> requestBody = (Map<String, Object>) spec.get("requestBody");
-        if (requestBody != null) {
-            Map<String, Object> schema = bodySchema(requestBody);
-            md.append("**Request body** (`application/json`): ").append(describeBody(schema)).append("\n\n");
-            List<String[]> rows = fieldRows(schema);
-            if (!rows.isEmpty()) {
-                renderFieldTable(md, rows, true);
+        if (op.bodyDescription() != null) {
+            md.append("**Request body** (`application/json`): ").append(op.bodyDescription()).append("\n\n");
+            if (!op.bodyRows().isEmpty()) {
+                renderFieldTable(md, op.bodyRows(), true);
             }
         }
-
-        Map<String, Object> responses = (Map<String, Object>) spec.getOrDefault("responses", Map.of());
-        String success = responses.keySet().stream().filter(code -> code.startsWith("2")).sorted().findFirst().orElse(null);
-        if (success != null) {
-            Map<String, Object> response = (Map<String, Object>) responses.get(success);
-            Map<String, Object> content = (Map<String, Object>) response.get("content");
-            if (content != null && !content.isEmpty()) {
-                Map<String, Object> media = (Map<String, Object>) content.values().iterator().next();
-                Map<String, Object> schema = (Map<String, Object>) media.get("schema");
-                List<String[]> rows = schema == null ? List.of() : fieldRows(schema);
-                if (!rows.isEmpty()) {
-                    md.append("<details><summary>Response fields</summary>\n\n");
-                    renderFieldTable(md, rows, false);
-                    md.append("</details>\n\n");
-                }
-            }
+        if (!op.responseRows().isEmpty()) {
+            md.append("<details><summary>Response fields</summary>\n\n");
+            renderFieldTable(md, op.responseRows(), false);
+            md.append("</details>\n\n");
         }
-
-        List<Sample> samples = operationSamples.stream().filter(s -> s.key().equals(operation.key())).toList();
-        for (Sample sample : samples) {
+        for (Sample sample : op.samples()) {
             md.append("**Example - ").append(sample.title()).append("**\n\n");
             renderSample(md, sample);
         }
@@ -230,10 +286,7 @@ final class ApiReferenceRenderer {
     }
 
     private void renderSample(StringBuilder md, Sample sample) {
-        md.append("```http\n").append(sample.method()).append(' ').append(sample.path());
-        if (!sample.query().isEmpty()) {
-            md.append('?').append(sample.query().stream().map(q -> q[0] + "=" + q[1]).collect(Collectors.joining("&")));
-        }
+        md.append("```http\n").append(sample.requestLine());
         md.append('\n');
         sample.requestHeaders().forEach((name, value) -> md.append(name).append(": ").append(value).append('\n'));
         if (sample.requestBody() != null) {
@@ -241,7 +294,7 @@ final class ApiReferenceRenderer {
         }
         md.append("```\n\n");
 
-        md.append("`").append(sample.status()).append(' ').append(STATUS_NAMES.getOrDefault(sample.status(), "")).append("`");
+        md.append("`").append(sample.status()).append(' ').append(sample.statusName()).append("`");
         if (sample.location() != null) {
             md.append(" - `Location: ").append(sample.location()).append('`');
         }

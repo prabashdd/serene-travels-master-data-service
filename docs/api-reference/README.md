@@ -1,6 +1,12 @@
 # Maintaining the API reference
 
-`docs/API-REFERENCE.md` is **generated** - do not edit it by hand.
+`docs/API-REFERENCE.md` and `docs/API-REFERENCE.html` are **generated** - do not edit either by hand.
+
+- **`API-REFERENCE.html`** is the one to read: a single self-contained page (no internet needed) with a side rail of areas
+  and endpoints, search (press `/`), collapsible field lists, highlighted samples with copy buttons, and light and dark themes.
+- **`API-REFERENCE.md`** is the same content as plain text, for diffs in code review and for viewing on GitHub.
+
+Both come from the same model, so they always say the same thing.
 
 ## What it is built from
 
@@ -10,12 +16,13 @@
 | "Who can call it" | `@PreAuthorize` on the method or controller | Editing the annotation |
 | Sample requests and responses | The scripted scenario in `src/test/java/.../docs/ApiReferenceTest.java`, which calls every endpoint for real against an in-memory database with a fixed clock | Editing the scenario |
 | Conventions, prices, error table at the top | `docs/api-reference/intro.md` | Editing that file |
+| Look and feel of the HTML page | `src/test/resources/api-reference/style.css` and `script.js`; the page layout is `ApiReferenceHtml.java` | Editing those files |
 
 Because the samples are *real responses*, they cannot drift from the code.
 
 ## It cannot go stale
 
-`ApiReferenceTest` runs with the normal test suite. It regenerates the document in memory and **fails if it differs from the committed file**, and it also fails if
+`ApiReferenceTest` runs with the normal test suite. It regenerates both files in memory and **fails if either differs from the committed file**, and it also fails if
 
 - an endpoint exists that has no sample (every operation needs at least one `.doc()` call), or
 - a sample refers to an endpoint that no longer exists.
@@ -28,7 +35,7 @@ Because the samples are *real responses*, they cannot drift from the code.
    ```
    mvnw test -Dtest=ApiReferenceTest -Dapi.docs.write=true
    ```
-3. Read the diff of `docs/API-REFERENCE.md`, check it says what you intended, and commit it with the code.
+3. Read the diff of `docs/API-REFERENCE.md` (the HTML changes with it), check it says what you intended, and commit both with the code.
 
 ## Adding a sample
 

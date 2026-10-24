@@ -28,6 +28,7 @@ import org.springframework.web.method.HandlerMethod;
 import org.springframework.web.servlet.mvc.method.RequestMappingInfo;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -72,6 +73,7 @@ class ApiReferenceTest {
 
     private static final String BASE = "/api/v1/master-data";
     private static final Path OUTPUT = Path.of("docs", "API-REFERENCE.md");
+    private static final Path HTML_OUTPUT = Path.of("docs", "API-REFERENCE.html");
     private static final Path INTRO = Path.of("docs", "api-reference", "intro.md");
     private static final String FIXED_CREATED_AT = "2026-10-18T03:00:00Z";
 
@@ -154,18 +156,32 @@ class ApiReferenceTest {
         assertThat(unknown).as("samples for operations that no longer exist").isEmpty();
         assertThat(unsampled).as("operations with no sample - add a .doc() call for each in ApiReferenceTest").isEmpty();
 
-        String generated = renderer.render();
+        // Both files come from the same model, so they cannot disagree with each other or with the code.
+        String markdown = renderer.render();
+        String html = ApiReferenceHtml.document(renderer, resource("/api-reference/style.css"), resource("/api-reference/script.js"));
         if (Boolean.getBoolean("api.docs.write")) {
-            Files.writeString(OUTPUT, generated, StandardCharsets.UTF_8);
+            Files.writeString(OUTPUT, markdown, StandardCharsets.UTF_8);
+            Files.writeString(HTML_OUTPUT, html, StandardCharsets.UTF_8);
             return;
         }
-        if (!Files.exists(OUTPUT)) {
-            fail("docs/API-REFERENCE.md does not exist. Generate it: mvnw test -Dtest=ApiReferenceTest -Dapi.docs.write=true");
+        assertUpToDate(OUTPUT, markdown);
+        assertUpToDate(HTML_OUTPUT, html);
+    }
+
+    private static void assertUpToDate(Path file, String generated) throws IOException {
+        if (!Files.exists(file)) {
+            fail(file + " does not exist. Generate it: mvnw test -Dtest=ApiReferenceTest -Dapi.docs.write=true");
         }
-        String committed = Files.readString(OUTPUT, StandardCharsets.UTF_8).replace("\r\n", "\n");
+        String committed = Files.readString(file, StandardCharsets.UTF_8).replace("\r\n", "\n");
         if (!generated.equals(committed)) {
-            fail("docs/API-REFERENCE.md is out of date (" + firstDifference(committed, generated) + "). Regenerate it with: "
+            fail(file + " is out of date (" + firstDifference(committed, generated) + "). Regenerate it with: "
                     + "mvnw test -Dtest=ApiReferenceTest -Dapi.docs.write=true  - then review and commit the change.");
+        }
+    }
+
+    private static String resource(String name) throws IOException {
+        try (var stream = ApiReferenceTest.class.getResourceAsStream(name)) {
+            return new String(stream.readAllBytes(), StandardCharsets.UTF_8).replace("\r\n", "\n");
         }
     }
 
