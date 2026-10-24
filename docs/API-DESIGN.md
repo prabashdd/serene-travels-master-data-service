@@ -67,7 +67,7 @@ Standalone: every lookup, `location-distances`, `info-articles`.
 | `tuk-tuk` | `tuk_tuk_fare_rate` | `tukTukLocationId` | LKR | — |
 | `package` | `site_tour_package_rate` | `packageId` | USD | — |
 | `tax` | `tax_rate_value` | `taxRateId` | PERCENT | — |
-| `promotion` | `promotion_value` | `promotionId` | USD *or* PERCENT by promotion `type` | — |
+| `promotion` | `promotion_value` | `promotionId` | PERCENT for a `PERCENTAGE` promotion (capped at 100), USD otherwise | — |
 | `transport` | `transport_rate_config` | *(none — singleton)* | LKR per km | — |
 
 > Confirmed: `misc` and `package` are USD; `guide-accommodation` and `tuk-tuk` are LKR (D2). The unit is a property of the family registry, so changing one later needs no endpoint changes.
@@ -131,7 +131,7 @@ Paths are relative to `/api/v1/master-data`. Every endpoint, read or write, requ
 | **vehicles** | `GET`/`POST /vehicles` (`q`, `vehicleTypeId`, `method`, `active`, `expiringWithinDays`) | `GET`/`PATCH`/`DELETE /vehicles/{id}` | — (the driver and assistant are plain fields: `driverId`, `assistantId`) |
 | **drivers** | `GET`/`POST /drivers` (`q` over name / NIC / phone / licence, `role`, `active`, `chauffeur`) | `GET`/`PATCH`/`DELETE /drivers/{id}` | each person lists the vehicles they are assigned to |
 | **guides** | `GET`/`POST /guides` (`q` over name / nickname / guide no / NIC / phone / email / town, `guideType`, `languageId`, `active`) | `GET`/`PATCH`/`DELETE /guides/{id}` | `PUT /guides/{id}/languages` replaces the set of language ids; `POST` also accepts `languageIds` to set them in the same call |
-| **promotions** | `GET`/`POST /promotions` (`active`, `validOn`) | `GET`/`PATCH`/`DELETE` | value via family `promotion` |
+| **promotions** | `GET`/`POST /promotions` (`q`, `type`, `active`, `validOn`, `destinationId`, `seasonId`, `at`) | `GET`/`PATCH`/`DELETE /promotions/{id}` (delete = deactivate) | value via family `promotion` (`PUT /rates/promotion`) |
 | **location-distances** | `GET`/`POST` (`fromDestinationId`, `toDestinationId`) | `GET`/`PATCH`/`DELETE` | — |
 | **info-articles** | `GET`/`POST` (`category`, `destinationId`) | `GET`/`PATCH`/`DELETE` | — |
 
@@ -261,10 +261,11 @@ Master data is an **internal back-office service**. Roles are the ones user-serv
 | Guides: list / search / sort / filter by language, create (optionally with languages), quick edit, soft delete, replace languages | ✅ built |
 | Restaurants: list / search / filter (dietary, closed or open on a day), create (optionally with days and dietary), rename / move, delete, replace closed days and dietary support | ✅ built |
 | Packages: list / search / filter by included site, create (optionally with sites), rename, delete, replace sites; current price shown (priced via `/rates/package`) | ✅ built |
-| Aggregates: promotions, distances, articles | ⏳ not built |
+| Promotions: list / search / filter, create, quick edit, soft delete, status and current value shown; value unit follows the type (rate engine reports PERCENT and caps at 100 for percentage promotions) | ✅ built |
+| Aggregates: distances, articles | ⏳ not built |
 | Alerts, import / export | ⏳ not built |
 | Rate list `sort` | Not supported on `GET /rates/{family}`: rows are always newest-first (`effective_from desc`) |
-| Promotion value unit | USD until `promotion.type` has agreed values (a percentage promotion would be PERCENT) |
+| Promotion value unit | Follows `promotion.type`: PERCENT for `PERCENTAGE`, USD for `FIXED_AMOUNT`. `COMPLIMENTARY` is treated as USD for now - what its value means (the worth of the freebie? a quantity?) is not defined anywhere, so confirm before relying on it |
 
 Tests: unit and HTTP tests run on in-memory H2 (PostgreSQL mode). `LivePostgresSmokeTest` is an opt-in check against the real schema (`mvnw test -Dtest=LivePostgresSmokeTest -Dlive.db=true`); it reads real data and writes only to session-local `TEMP` copies of the tables, so it cannot change `tour-management`.
 
@@ -281,6 +282,7 @@ Tests: unit and HTTP tests run on in-memory H2 (PostgreSQL mode). `LivePostgresS
 - `attraction.pricing_method` (`PER_PERSON` / `FIXED_GROUP_PLUS_EXTRA`) and `attraction_rate.rate_type` (seven values, see §5.1) are closed lists enforced by the database; the API validates them and publishes them (the rate families endpoint lists the allowed rate types). `vehicle.method` (`INTERNAL` / `CONTRACTED`), `driver.role` (`DRIVER` / `ASSISTANT`) and `guide.guide_type` (`DRIVER` / `CHAUFFEUR_GUIDE` / `NATIONAL_GUIDE`) are closed lists enforced by the database and validated by the API. Introduce closed enums later, once the full value sets are known.
 - Rate corrections via `PATCH` rely on `created_by` only in v1. A `rate_audit` table (§5.2) is a recommended follow-up, not part of v1.
 
+- Promotions: `type` is a closed list enforced by the database (`PERCENTAGE`, `FIXED_AMOUNT`, `COMPLIMENTARY`), accepted in any letter case. A promotion runs from `validFrom` up to, **not including**, `validTo` (half-open, like rates); the database requires `validTo > validFrom`. A null `destinationId` / `seasonId` / `minGroupSize` means no limit. `status` is worked out for the requested date: `INACTIVE`, `UPCOMING`, `RUNNING` or `ENDED`. The type cannot change once a value exists (409 `TYPE_LOCKED`). Names are not unique (the database does not require it). Stacking and minimum-spend rules are undecided in the source requirements and are not modelled.
 - AGENT has no access to this service; agents see prices only through quotations (D4). `technical_visit_category` is soft-deleted (D5).
 
 **Still open**

@@ -227,6 +227,31 @@ create table site_tour_package_rate (
     check (effective_to is null or effective_to > effective_from)
 );
 
+-- NOTE: the real promotion.type has a CHECK on PERCENTAGE / FIXED_AMOUNT / COMPLIMENTARY, left out here for the same
+-- H2 reason as the attraction lists; the service validates it and LivePostgresSmokeTest covers the real constraint.
+create table promotion (
+    id integer generated always as identity primary key,
+    name varchar(255) not null,
+    type varchar(50) not null,
+    valid_from date not null,
+    valid_to date not null,
+    min_group_size smallint,
+    destination_id integer references destination (id),
+    season_id integer references season (id),
+    active boolean default true not null,
+    check (valid_to > valid_from)
+);
+create table promotion_value (
+    id integer generated always as identity primary key,
+    promotion_id integer not null references promotion (id),
+    "value" numeric(10, 2) not null,
+    effective_from date not null,
+    effective_to date,
+    created_at timestamp with time zone default current_timestamp not null,
+    created_by varchar(255) not null,
+    check (effective_to is null or effective_to > effective_from)
+);
+
 create table property_rate (
     id integer generated always as identity primary key,
     property_id integer not null,

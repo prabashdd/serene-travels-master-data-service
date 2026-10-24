@@ -102,8 +102,9 @@ public final class RateFamilies {
         add(new Family("tax", "Tax rates", "tax_rate_value", "percentage", RateUnit.PERCENT, false, MAX_PERCENT,
                 List.of(ref("taxRateId", "tax_rate_id", "Tax", "tax-rates", "tax_rate")),
                 null, null));
-        // The unit is USD until promotion.type has agreed values: a percentage promotion would be PERCENT.
-        add(new Family("promotion", "Promotion values", "promotion_value", "\"value\"", RateUnit.USD, false,
+        // USD here is the default: the rate engine reports PERCENT (and caps at 100) for a promotion whose type is
+        // PERCENTAGE, looking the type up per row.
+        add(new Family("promotion", "Promotion values (USD, or % for a percentage promotion)", "promotion_value", "\"value\"", RateUnit.USD, false,
                 MAX_MONEY,
                 List.of(ref("promotionId", "promotion_id", "Promotion", "promotions", "promotion")),
                 null, null));

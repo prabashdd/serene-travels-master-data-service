@@ -954,9 +954,12 @@ paths:
         - $ref: '#/components/parameters/Size'
         - $ref: '#/components/parameters/Sort'
         - $ref: '#/components/parameters/Q'
+        - { name: type, in: query, description: 'Only this type', schema: { $ref: '#/components/schemas/PromotionType' } }
         - $ref: '#/components/parameters/Active'
-        - { name: validOn, in: query, description: 'Only promotions valid on this date', schema: { type: string, format: date } }
+        - { name: validOn, in: query, description: 'Only promotions running on this date (validFrom <= date < validTo)', schema: { type: string, format: date } }
         - $ref: '#/components/parameters/DestinationId'
+        - { name: seasonId, in: query, description: 'Only promotions tied to this season', schema: { type: integer } }
+        - $ref: '#/components/parameters/At'
       responses:
         '200':
           description: Page of promotions
@@ -967,6 +970,7 @@ paths:
       tags: [Promotions]
       operationId: createPromotion
       summary: Create a promotion
+      description: 'Required: name, type, validFrom, validTo (the promotion runs up to, not including, validTo). Leave destinationId, seasonId and minGroupSize out to apply everywhere. Set the value afterwards with PUT /rates/promotion.'
       requestBody:
         required: true
         content:
@@ -999,6 +1003,7 @@ paths:
       tags: [Promotions]
       operationId: updatePromotion
       summary: Quick edit
+      description: 'Send null for minGroupSize, destinationId or seasonId to clear it. The type cannot change once a value has been set (409 TYPE_LOCKED). Bring back a deactivated promotion with {"active": true}.'
       requestBody:
         required: true
         content:
@@ -1011,6 +1016,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Promotion' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
     delete:
       tags: [Promotions]
       operationId: deactivatePromotion
@@ -2021,9 +2027,9 @@ components:
       properties:
         id: { type: integer }
         name: { type: string }
-        type: { type: string, description: 'Free text today; determines whether the value is USD or PERCENT' }
+        type: { $ref: '#/components/schemas/PromotionType' }
         validFrom: { type: string, format: date }
-        validTo: { type: string, format: date }
+        validTo: { type: string, format: date, description: 'Not included: the promotion runs up to this date' }
         minGroupSize: { type: integer, nullable: true }
         destination:
           allOf:
@@ -2034,18 +2040,28 @@ components:
             - $ref: '#/components/schemas/Ref'
           nullable: true
         active: { type: boolean }
+        status:
+          type: string
+          description: Worked out for the requested date (default today)
+          enum: [INACTIVE, UPCOMING, RUNNING, ENDED]
         currentValue:
+          description: The value in force on that date - unit PERCENT for a PERCENTAGE promotion, USD otherwise
           allOf:
             - $ref: '#/components/schemas/RateAmount'
           nullable: true
+    PromotionType:
+      type: string
+      description: Any letter case is accepted and normalised to upper case.
+      enum: [PERCENTAGE, FIXED_AMOUNT, COMPLIMENTARY]
     PromotionInput:
       type: object
+      description: 'Required on create: name, type, validFrom, validTo.'
       properties:
         name: { type: string }
-        type: { type: string }
+        type: { $ref: '#/components/schemas/PromotionType' }
         validFrom: { type: string, format: date }
-        validTo: { type: string, format: date }
-        minGroupSize: { type: integer }
+        validTo: { type: string, format: date, description: Must be after validFrom }
+        minGroupSize: { type: integer, nullable: true, minimum: 1 }
         destinationId: { type: integer, nullable: true }
         seasonId: { type: integer, nullable: true }
         active: { type: boolean }

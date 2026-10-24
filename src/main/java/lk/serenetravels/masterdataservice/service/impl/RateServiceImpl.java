@@ -7,6 +7,7 @@ import lk.serenetravels.masterdataservice.dto.RateCorrectionRequest;
 import lk.serenetravels.masterdataservice.dto.RateFamilyResponse;
 import lk.serenetravels.masterdataservice.dto.RateKeyResponse;
 import lk.serenetravels.masterdataservice.dto.RateRowResponse;
+import lk.serenetravels.masterdataservice.dto.RateUnit;
 import lk.serenetravels.masterdataservice.dto.RateWriteRequest;
 import lk.serenetravels.masterdataservice.dto.ResolvedRateResponse;
 import lk.serenetravels.masterdataservice.exception.ConflictException;
@@ -31,6 +32,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -46,6 +48,7 @@ import java.util.stream.Collectors;
 public class RateServiceImpl implements RateService {
 
     private static final int MAX_PAGE_SIZE = 200;
+    private static final BigDecimal PERCENT_CAP = new BigDecimal("100.00");
 
     private final JdbcClient jdbc;
     private final Clock clock;
@@ -139,7 +142,7 @@ public class RateServiceImpl implements RateService {
                     .params(params).query(rowMapper(family)).list();
             if (!found.isEmpty()) {
                 RateRowResponse row = toResponses(family, found, on).get(0);
-                return new ResolvedRateResponse(row.rate(), family.unit(), attempt.matched(), row);
+                return new ResolvedRateResponse(row.rate(), row.unit(), attempt.matched(), row);
             }
         }
         throw new NotFoundException("NO_RATE", "No " + family.name() + " rate applies on " + on + " for " + keys);
@@ -193,6 +196,9 @@ public class RateServiceImpl implements RateService {
         RawRate current = findRaw(family, id);
 
         BigDecimal value = request.rate() != null ? validateValue(family, request.rate(), "rate") : current.value();
+        if (request.rate() != null) {
+            checkCap(family, current.keys(), value, "rate");
+        }
         LocalDate from = request.effectiveFrom() != null ? request.effectiveFrom() : current.from();
         LocalDate to = request.effectiveTo() != null ? request.effectiveTo() : current.to();
         if (to != null && !to.isAfter(from)) {
@@ -251,11 +257,13 @@ public class RateServiceImpl implements RateService {
         List<RateAdjustItem> items = new ArrayList<>();
         for (RawRate row : rows) {
             BigDecimal newRate = RateMath.adjust(row.value(), request.mode(), request.value(), rounding);
-            if (newRate.signum() < 0 || newRate.compareTo(family.max()) > 0) {
+            RateUnit unit = unitFor(family, row.keys());
+            BigDecimal max = unit == RateUnit.PERCENT && family.max().compareTo(PERCENT_CAP) > 0 ? PERCENT_CAP : family.max();
+            if (newRate.signum() < 0 || newRate.compareTo(max) > 0) {
                 throw InvalidRequestException.field("value",
                         "would produce an out-of-range rate (" + newRate + ") for " + row.keys());
             }
-            items.add(new RateAdjustItem(row.keys(), row.value(), newRate, family.unit()));
+            items.add(new RateAdjustItem(row.keys(), row.value(), newRate, unit));
         }
 
         if (!request.dryRun()) {
@@ -273,6 +281,7 @@ public class RateServiceImpl implements RateService {
     private List<Integer> setOne(Family family, RateWriteRequest request, String createdBy) {
         Map<String, Object> keys = normalizeKeys(family, request.keys(), true);
         BigDecimal value = validateValue(family, request.rate(), "rate");
+        checkCap(family, keys, value, "rate");
         LocalDate from = request.effectiveFrom() != null ? request.effectiveFrom() : today();
 
         List<Integer> ids = new ArrayList<>();
@@ -477,6 +486,39 @@ public class RateServiceImpl implements RateService {
         return value.setScale(2);
     }
 
+    // The unit of one rate row. It is the family's, except for promotions, whose value is a percentage or an
+    // amount of money depending on the promotion's own type (COMPLIMENTARY is treated as an amount).
+    private RateUnit unitFor(Family family, Map<String, Object> keys) {
+        if (isPromotion(family) && keys.get("promotionId") instanceof Integer id) {
+            return promotionUnits(List.of(id)).getOrDefault(id, family.unit());
+        }
+        return family.unit();
+    }
+
+    // A percentage can never exceed 100, whatever the family's money ceiling is.
+    private void checkCap(Family family, Map<String, Object> keys, BigDecimal value, String field) {
+        if (unitFor(family, keys) == RateUnit.PERCENT && value.compareTo(PERCENT_CAP) > 0) {
+            throw InvalidRequestException.field(field, "must not exceed 100 for a percentage");
+        }
+    }
+
+    private Map<Integer, RateUnit> promotionUnits(Collection<Integer> ids) {
+        Map<Integer, RateUnit> units = new HashMap<>();
+        if (ids.isEmpty()) {
+            return units;
+        }
+        jdbc.sql("select id, type from promotion where id in (:ids)").param("ids", ids)
+                .query((rs, n) -> {
+                    units.put(rs.getInt("id"), "PERCENTAGE".equals(rs.getString("type")) ? RateUnit.PERCENT : RateUnit.USD);
+                    return null;
+                }).list();
+        return units;
+    }
+
+    private static boolean isPromotion(Family family) {
+        return "promotion".equals(family.name());
+    }
+
     // ------------------------------------------------------------------ SQL helpers
 
     // `column = :k_name` (or `column is null`) per key present in the map. Identifiers come from the
@@ -563,6 +605,11 @@ public class RateServiceImpl implements RateService {
             names.put(key.name(), byId);
         }
 
+        Map<Integer, RateUnit> promotionUnits = isPromotion(family)
+                ? promotionUnits(rows.stream().map(r -> r.keys().get("promotionId")).filter(Integer.class::isInstance)
+                .map(Integer.class::cast).collect(Collectors.toSet()))
+                : Map.of();
+
         return rows.stream().map(row -> {
             Map<String, String> labels = new LinkedHashMap<>();
             for (Key key : family.keys()) {
@@ -572,7 +619,9 @@ public class RateServiceImpl implements RateService {
                 }
             }
             boolean isCurrent = !row.from().isAfter(on) && (row.to() == null || row.to().isAfter(on));
-            return new RateRowResponse(row.id(), family.name(), row.keys(), labels, row.value(), family.unit(),
+            RateUnit unit = row.keys().get("promotionId") instanceof Integer promotionId
+                    ? promotionUnits.getOrDefault(promotionId, family.unit()) : family.unit();
+            return new RateRowResponse(row.id(), family.name(), row.keys(), labels, row.value(), unit,
                     row.from(), row.to(), isCurrent, row.createdAt(), row.createdBy());
         }).toList();
     }

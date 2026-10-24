@@ -9,6 +9,7 @@ import lk.serenetravels.masterdataservice.dto.DriverResponse;
 import lk.serenetravels.masterdataservice.dto.GuideResponse;
 import lk.serenetravels.masterdataservice.dto.PackageResponse;
 import lk.serenetravels.masterdataservice.dto.PageResponse;
+import lk.serenetravels.masterdataservice.dto.PromotionResponse;
 import lk.serenetravels.masterdataservice.dto.PropertyInclusionRequest;
 import lk.serenetravels.masterdataservice.dto.PropertyResponse;
 import lk.serenetravels.masterdataservice.dto.PropertySummaryResponse;
@@ -23,6 +24,7 @@ import lk.serenetravels.masterdataservice.service.impl.DriverServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.GuideServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.LookupServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.PackageServiceImpl;
+import lk.serenetravels.masterdataservice.service.impl.PromotionServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.PropertyServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.RateServiceImpl;
 import lk.serenetravels.masterdataservice.service.impl.RestaurantServiceImpl;
@@ -535,6 +537,70 @@ class LivePostgresSmokeTest {
             PackageResponse spare = packages.create(new java.util.LinkedHashMap<>(Map.of("name", "Smoke Spare")));
             packages.delete(spare.id());
             assertThat(count(jdbc, "site_tour_package")).isEqualTo(1);
+
+            // ---- the real tables are exactly as they were
+            for (String table : realTables) {
+                assertThat(count(jdbc, "public." + table)).as(table).isEqualTo(before.get(table));
+            }
+        }
+    }
+
+    @Test
+    void promotionsFollowTheRealTypeListAndWriteOnlyToSessionLocalCopies() throws Exception {
+        try (SingleConnectionDataSource dataSource = new SingleConnectionDataSource(URL, "postgres", "postgres", true)) {
+            JdbcClient jdbc = JdbcClient.create(dataSource);
+            Clock clock = Clock.system(ZoneId.of("Asia/Colombo"));
+            RateServiceImpl rates = new RateServiceImpl(jdbc, clock);
+            PromotionServiceImpl promotions = new PromotionServiceImpl(jdbc, clock);
+
+            List<String> realTables = List.of("promotion", "promotion_value");
+            Map<String, Long> before = new java.util.LinkedHashMap<>();
+            for (String table : realTables) {
+                before.put(table, count(jdbc, "public." + table));
+            }
+
+            // ---- the real database only accepts the three types the API publishes
+            assertThatThrownBy(() -> jdbc.sql("insert into public.promotion (name, type, valid_from, valid_to) "
+                    + "values ('bad', 'BOGO', '2026-01-01', '2026-02-01')").update())
+                    .isInstanceOfSatisfying(org.springframework.dao.DataIntegrityViolationException.class,
+                            e -> assertThat(lk.serenetravels.masterdataservice.util.SqlErrors.sqlState(e)).isEqualTo("23514"));
+
+            // ---- reads work against the real (currently empty) tables
+            assertThat(promotions.list(null, "PERCENTAGE", true, LocalDate.now(clock), null, null, null, List.of("validFrom,desc"), 0, 20)
+                    .totalElements()).isLessThanOrEqualTo(before.get("promotion"));
+
+            // ---- writes against session-local shadows only (real constraints and the open-value partial index kept)
+            for (String table : realTables) {
+                jdbc.sql("create temp table " + table + " (like public." + table + " including all)").update();
+            }
+            int destinationId = jdbc.sql("select min(id) from public.destination").query(Integer.class).single();
+            int seasonId = jdbc.sql("select min(id) from public.season").query(Integer.class).single();
+            LocalDate today = LocalDate.now(clock);
+
+            PromotionResponse created = promotions.create(new java.util.LinkedHashMap<>(Map.of(
+                    "name", "Smoke Early Bird", "type", "percentage", "validFrom", today.minusDays(1).toString(),
+                    "validTo", today.plusDays(30).toString(), "minGroupSize", 4, "destinationId", destinationId,
+                    "seasonId", seasonId)));
+            assertThat(created.status()).isEqualTo("RUNNING");
+
+            // The value goes through the real "value" column; as a percentage it is reported in PERCENT and capped at 100.
+            RateRowResponse row = rates.setRate("promotion", new RateWriteRequest(
+                    Map.of("promotionId", created.id()), new BigDecimal("12.5"), null), "smoke-test").get(0);
+            assertThat(row.unit()).isEqualTo(lk.serenetravels.masterdataservice.dto.RateUnit.PERCENT);
+            assertThatThrownBy(() -> rates.setRate("promotion", new RateWriteRequest(
+                    Map.of("promotionId", created.id()), new BigDecimal("101"), today.plusDays(5)), "smoke-test"))
+                    .isInstanceOf(lk.serenetravels.masterdataservice.exception.InvalidRequestException.class);
+            assertThat(promotions.get(created.id(), null).currentValue().rate()).isEqualByComparingTo("12.5");
+
+            // Once priced, the type is locked; the real window check (valid_to > valid_from) is mirrored by the API.
+            assertThatThrownBy(() -> promotions.update(created.id(), new java.util.LinkedHashMap<>(Map.of("type", "FIXED_AMOUNT"))))
+                    .isInstanceOfSatisfying(ConflictException.class, e -> assertThat(e.getCode()).isEqualTo("TYPE_LOCKED"));
+            assertThatThrownBy(() -> promotions.update(created.id(), new java.util.LinkedHashMap<>(Map.of("validTo", today.minusDays(5).toString()))))
+                    .isInstanceOf(lk.serenetravels.masterdataservice.exception.InvalidRequestException.class);
+
+            promotions.deactivate(created.id());
+            assertThat(promotions.list("smoke", null, false, null, null, null, null, null, 0, 10).content()).hasSize(1);
+            assertThat(count(jdbc, "promotion")).isEqualTo(1);
 
             // ---- the real tables are exactly as they were
             for (String table : realTables) {
